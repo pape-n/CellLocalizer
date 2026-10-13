@@ -1,0 +1,210 @@
+# Tests, then builds for Windows and macOS, then a GitHub release v<version>.
+# The builds upload their files straight into a draft release, which is published when both builds
+# worked. No workflow artifacts: their storage quota (500 MB) filled up with the installers (12.10.).
+# A release is made only when main has a version number in localization_tool/__init__.py without a
+# release tag yet; a push never replaces a published release (a manual run with "release" ticked does). A change of this workflow builds the
+# programs again (to test the build) without publishing. Other pushes only run the tests. "Run workflow" on the Actions page builds
+# by hand; it publishes a release only if "release" is ticked.
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release"
+        type: boolean
+        default: false
+
+env:
+  PYINSTALLER: pyinstaller==6.16.0
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.changed.outputs.changed }}
+      new_tag: ${{ steps.changed.outputs.new_tag }}
+      publish: ${{ steps.changed.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: version
+        run: echo "version=$(python -c 'import localization_tool; print(localization_tool.__version__)')" >> $GITHUB_OUTPUT
+      - id: changed
+        run: |
+          # build when there is no release tag for this version yet (also when the version was raised
+          # in an earlier commit of the same push), or when this workflow changed
+          V=${{ steps.version.outputs.version }}
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$V" > /dev/null
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
+            echo "::error::release tags could not be read (git ls-remote exit code $rc)"
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.release }}" = "true" ]; then
+            echo "publish=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ] && [ $rc -eq 2 ]; then
+            echo "publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish=false" >> $GITHUB_OUTPUT
+          fi
+          if [ $rc -eq 2 ]; then
+            echo "new_tag=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "new_tag=false" >> $GITHUB_OUTPUT
+            if git diff --name-only HEAD~1 HEAD | grep -qE '^\.github/workflows/build\.yml$'; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+      - name: Display and OpenGL libraries for the GUI tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libegl1 libgl1 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-image0 libxcb-shape0 \
+            libfontconfig1 libdbus-1-3
+      - run: pip install -r requirements-dev.txt
+      - name: Tests
+        run: |
+          set -o pipefail
+          xvfb-run -a -s "-screen 0 1600x1000x24" pytest -q -rf 2>&1 | tee pytest.txt
+      - name: Failed tests as annotations (readable without the log)
+        if: failure()
+        run: |
+          grep -E "^(FAILED|ERROR)|^E  " pytest.txt | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+
+  draft:
+    # an empty draft release that the builds fill; a draft has no tag yet, so a failed build leaves
+    # nothing published
+    needs: test
+    if: needs.test.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Draft release
+        run: |
+          V=${{ needs.test.outputs.version }}
+          # an earlier draft or (manual run with "release") an earlier release of this version is replaced
+          for id in $(gh api "repos/$GH_REPO/releases" --paginate -q ".[] | select(.tag_name == \"v$V\") | .id"); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          if git ls-remote --exit-code --tags origin "refs/tags/v$V" > /dev/null; then
+            git push origin ":refs/tags/v$V"
+          fi
+          PRE=""
+          case "$V" in *a*|*b*|*rc*) PRE="--prerelease";; esac
+          printf '%s\n' \
+            "Windows: CellLocalizer-$V-Windows-Setup.exe (installer, no admin rights) or the portable zip." \
+            "macOS (Apple Silicon): CellLocalizer-$V-macOS-arm64.dmg." \
+            "The programs are not signed. First start: see INSTALL.md. What is new and what to watch for: RELEASE_NOTES.md (both attached)." > body.md
+          gh release create "v$V" --draft $PRE --target "${{ github.sha }}" --title "CellLocalizer $V" \
+            --notes-file body.md docs/RELEASE_NOTES.md docs/INSTALL.md
+
+  windows:
+    needs: [test, draft]
+    if: always() && needs.test.result == 'success' && (needs.test.outputs.changed == 'true' || github.event_name == 'workflow_dispatch') && needs.draft.result != 'failure'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt ${{ env.PYINSTALLER }}
+      - name: Version
+        shell: bash
+        run: |
+          V=$(python -c "import localization_tool; print(localization_tool.__version__)")
+          echo "VERSION=$V" >> $GITHUB_ENV
+          echo "VERSIONNUM=$(python -c "import re; print(re.match(r'[0-9.]+', '$V').group().rstrip('.'))")" >> $GITHUB_ENV
+      - run: pyinstaller packaging/localization.spec --noconfirm --workpath build/pyinstaller
+      - name: Self test of the built program
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\CellLocalizer\CellLocalizer.exe -ArgumentList "--self-test","selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\CellLocalizer -DestinationPath "dist\CellLocalizer-$env:VERSION-Windows-portable.zip"
+      - name: Installer
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+          & $iscc /Q "/DAppVersion=$env:VERSION" "/DAppVersionNum=$env:VERSIONNUM" packaging\installer.iss
+      - name: Into the draft release
+        if: needs.test.outputs.publish == 'true'
+        shell: bash
+        run: gh release upload "v$VERSION" dist/*.zip dist/*Setup.exe --clobber
+
+  macos:
+    needs: [test, draft]
+    if: always() && needs.test.result == 'success' && (needs.test.outputs.changed == 'true' || github.event_name == 'workflow_dispatch') && needs.draft.result != 'failure'
+    runs-on: macos-14        # Apple Silicon
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt ${{ env.PYINSTALLER }}
+      - run: echo "VERSION=$(python -c 'import localization_tool; print(localization_tool.__version__)')" >> $GITHUB_ENV
+      - run: pyinstaller packaging/localization.spec --noconfirm --workpath build/pyinstaller
+      - name: Self test of the built program
+        run: |
+          dist/CellLocalizer.app/Contents/MacOS/CellLocalizer --self-test selftest.txt
+          cat selftest.txt
+      - name: Disk image
+        run: |
+          mkdir stage
+          cp -R dist/CellLocalizer.app stage/
+          ln -s /Applications stage/Applications
+          # hdiutil fails now and then on the hosted runners ("Resource busy"): try up to three times
+          for i in 1 2 3; do
+            hdiutil create -volname "CellLocalizer" -srcfolder stage -ov -format UDZO \
+              "dist/CellLocalizer-$VERSION-macOS-arm64.dmg" && break
+            [ $i -eq 3 ] && exit 1
+            sleep 20
+          done
+      - name: Into the draft release
+        if: needs.test.outputs.publish == 'true'
+        run: gh release upload "v$VERSION" dist/*.dmg --clobber
+
+  release:
+    needs: [test, draft, windows, macos]
+    if: always() && needs.test.outputs.publish == 'true' && needs.windows.result == 'success' && needs.macos.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Publish
+        run: gh release edit "v${{ needs.test.outputs.version }}" --draft=false

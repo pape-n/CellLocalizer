@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "CellLocalizer: quantitative subcellular localization in confocal 3D stacks"
+version: 2.0.1
+date-released: 2026-10-13
+license: BSD-3-Clause
+repository-code: "https://github.com/pape-n/CellLocalizer"
+authors:
+  - family-names: Pape
+    given-names: Nils
+    affiliation: "Institute of Physiology II, University of Münster"
+    email: npape2@uni-muenster.de
+keywords:
+  - microscopy
+  - image analysis
+  - subcellular localization
+  - confocal
+  - Airyscan
+  - napari
