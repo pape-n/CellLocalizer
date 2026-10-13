@@ -95,7 +95,7 @@ class StartWindow(QWidget):
         cards = QHBoxLayout()
         cards.setSpacing(20)
         self.card_new = Card("New analysis", "Choose the images of an experiment: a whole folder or single files. "
-                                             "You can also drop .czi files on this window.")
+                                             "You can also drop .czi or .nd2 files on this window.")
         self.card_new.clicked.connect(new_analysis)
         self.card_open = Card("Open analysis", "Continue a saved analysis (analysis.lta.json): check more cells, "
                                                "change settings, save again.")

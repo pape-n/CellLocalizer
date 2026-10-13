@@ -7,7 +7,9 @@ from dataclasses import asdict, dataclass, field, fields
 THRESHOLD_METHODS = ("otsu", "triangle", "li", "halfmax", "manual")
 ACTIN_DEFINITIONS = ("threshold", "shell")
 Z_REFERENCES = ("auto", "first_plane", "last_plane")
-MASK_KEYS = ("cell", "nucleus", "actin", "actin_rich", "target")
+MASK_KEYS = ("cell", "nucleus", "actin", "actin_rich", "target", "comparison")
+TARGET_SIGNALS = ("mask", "all")             # D89: count the target signal inside its mask, or all of it (D30)
+POLARITY_FROM = ("actin_rich", "actin_signal")   # D88: front end of the axis
 
 
 @dataclass
@@ -56,13 +58,23 @@ def _target_default() -> MaskParams:
     return MaskParams(sigma_um=0.15, method="li")
 
 
+def _comparison_default() -> MaskParams:
+    # a second stained protein (D83), its area found like the target
+    return MaskParams(sigma_um=0.15, method="li")
+
+
 @dataclass
 class AnalysisParams:
     cell: MaskParams = field(default_factory=_cell_default)
     nucleus: MaskParams = field(default_factory=_nucleus_default)
     actin: MaskParams = field(default_factory=_actin_default)            # all actin, compartment (D28)
     actin_rich: MaskParams = field(default_factory=_actin_rich_default)  # brightest actin, zone (D28)
-    target: MaskParams = field(default_factory=_target_default)          # brightest target signal, view (D30)
+    target: MaskParams = field(default_factory=_target_default)          # stained target signal (D30, D89)
+    comparison: MaskParams = field(default_factory=_comparison_default)  # area of a comparison channel (D83)
+    target_signal: str = "mask"              # D89: "mask" counts the target signal inside its mask, "all" all of it
+    polarity_from: str = "actin_rich"        # D88: axis towards the actin-rich mask, or the whole actin signal
+    polarity_clear_index: float = 0.25       # D84: polarity index from which the front direction counts as clear
+    envelope_lateral_only: bool = False      # D86 (c): nuclear envelope zones only at the side of the nucleus
     nucleus_max_hole_um2: float = 0.25      # holes per plane up to this area count as nucleus
     nucleus_dim_hole_fraction: float = 0.0  # > 0: holes of any size with DAPI >= this x threshold count as nucleus (D51, off)
     actin_definition: str = "threshold"      # D16: actin compartment by threshold, or "shell" under the surface
@@ -92,6 +104,12 @@ class AnalysisParams:
             raise ValueError("bottom_fraction must be between 0 and 1")
         if self.axial_scale <= 0:
             raise ValueError("axial_scale must be > 0")
+        if self.target_signal not in TARGET_SIGNALS:
+            raise ValueError(f"unknown target signal {self.target_signal!r}")
+        if self.polarity_from not in POLARITY_FROM:
+            raise ValueError(f"unknown polarity axis {self.polarity_from!r}")
+        if self.polarity_clear_index < 0:
+            raise ValueError("polarity_clear_index must be >= 0")
         for key in MASK_KEYS:
             if key not in ("nucleus", "cell") and getattr(self, key).method == "halfmax":
                 raise ValueError(f"the half-maximum threshold is only available for nucleus and cell edge, not {key!r}")

@@ -62,7 +62,8 @@ def analyze_spec(stack: ImageStack, assignments, params: AnalysisParams, spec: C
 # 2 = version 0.5/1.0 (D39: cytoplasm includes actin; empty instead of 0 % for missing compartments)
 # 3 = version 1.1 (D51 half-maximum nucleus edge, D52 coverslip gap open, D53 no mask on unstained targets)
 # 4 = version 1.2 (D55 channel offsets, D56 sensitivity span, D63 acquisition settings in the rows)
-RESULTS_VERSION = 4
+# 5 = version 2.1 (D83 comparison channels, D84 to D86 new columns, D88 and D89 for new analyses)
+RESULTS_VERSION = 5
 
 
 def cell_results(image: ImageSpec, spec: CellSpec, box: CropBox, r: CellResult, params: AnalysisParams) -> dict:

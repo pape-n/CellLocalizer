@@ -35,6 +35,13 @@ for dist in ("napari", "napari-svg", "npe2", "app-model", "magicgui", "imageio",
 # program resources (icon) and the marching cubes module for the 3D surfaces
 datas += [(str(ROOT / "localization_tool" / "resources"), "localization_tool/resources")]
 hiddenimports += collect_submodules("czifile") + collect_submodules("imagecodecs")
+# Nikon ND2 (D90): the reader and its metadata models
+hiddenimports += collect_submodules("nd2") + collect_submodules("ome_types")
+for dist in ("nd2", "ome-types"):
+    try:
+        datas += copy_metadata(dist)
+    except Exception:
+        pass
 # python-docx loads its Word template from package data (methods text, D58)
 datas += collect_data_files("docx")
 hiddenimports += collect_submodules("docx")

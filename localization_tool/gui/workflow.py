@@ -37,6 +37,9 @@ COMPARTMENT_TOGGLES = (("nucleus", "Nucleus", "#3D7DFF"), ("actin", "Actin", "#2
                        ("actin_rich", "Actin-rich", "#FFD60A"), ("cytoplasm", "Cytoplasm", "#9AA4AF"),
                        ("cell", "Cell edge", "#FFFFFF"))
 
+ONLY_ITEMS = {"Show all": None, "Only nucleus": "nucleus", "Only actin": "actin", "Only actin-rich": "actin_rich",
+              "Only cytoplasm": "cytoplasm", "Only target mask": "target"}
+
 CHOOSE_REASON = "Choose a reason ..."
 EXCLUDE_REASONS = ("Cell cut off (stack too short)", "Several cells, cannot be separated", "Out of focus",
                    "Dying or dividing cell", "Debris or artefact", "Weak or uneven staining", "Other")
@@ -112,6 +115,7 @@ class WorkflowPanel(QWidget):
         self.step = 0
         self._base: dict[str, float] = {}
         self._working = False
+        self._jobs: dict[str, str] = {}          # running calculations by kind (D87): one finishing does not unlock the others
         self._go_after: int | None = None
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -259,6 +263,8 @@ class WorkflowPanel(QWidget):
         if step != previous:
             self.scroll.verticalScrollBar().setValue(0)
         self.instruction.setText(LOADED if step == 0 and self.main.state.full is not None else INSTRUCTIONS[step])
+        if step == 1:
+            self.rebuild_display()               # visibility may have changed in steps 3 and 4 (D87)
         if step in (2, 3):
             self.rebuild_channel_toggles()
         self.main.enter_step(step, previous)
@@ -316,8 +322,15 @@ class WorkflowPanel(QWidget):
         self.view_2d.setChecked(nd == 2)
         self.view_3d.setChecked(nd == 3)
 
-    def set_working(self, busy: bool, text: str = "") -> None:
-        """Lock the panel and show a busy bar while the program computes."""
+    def set_working(self, busy: bool, text: str = "", job: str = "work") -> None:
+        """Lock the panel and show a busy bar while the program computes. Each kind of calculation is
+        counted on its own, so the panel unlocks only when the last one has finished (D87)."""
+        if busy:
+            self._jobs[job] = text
+        else:
+            self._jobs.pop(job, None)
+        busy = bool(self._jobs)
+        text = next(reversed(self._jobs.values()), "") if busy else ""
         self._working = busy
         self.work_box.setVisible(busy)
         self.work_text.setText(text)
@@ -449,7 +462,7 @@ class WorkflowPanel(QWidget):
         for b in (self.add_btn, self.add_folder_btn, self.open_sel_btn):
             b.setEnabled(not busy)
         self.busy.setText(text if busy else "")
-        self.set_working(busy, text)
+        self.set_working(busy, text, job="load")
 
     def set_batch(self, busy: bool, text: str = "", done: int = 0, total: int = 0):
         """Progress of 'Analyze all images' and 'Apply settings to all cells'."""
@@ -558,7 +571,7 @@ class WorkflowPanel(QWidget):
             vis.toggled.connect(lambda on, l=layer: setattr(l, "visible", on))
             bright = QSlider(Qt.Horizontal)
             bright.setRange(10, 300)
-            bright.setValue(100)
+            bright.setValue(int(round(100 * layer.metadata.get("brightness", 1.0))))
             bright.setToolTip("Brightness of this channel on screen")
             bright.valueChanged.connect(lambda v, l=layer: self.main.set_brightness(l, v / 100.0))
             row.addWidget(vis, 1)
@@ -585,6 +598,8 @@ class WorkflowPanel(QWidget):
     def _channels_changed(self):
         a = self.channel_table.assignments()
         self._show_problems(a)
+        if [vars(x) for x in a] == [vars(x) for x in (self.main.state.assignments or [])]:
+            return                               # editing finished without a change (D87)
         self.main.apply_assignments(a)
         self.rebuild_display()
         self.refresh()
@@ -639,7 +654,7 @@ class WorkflowPanel(QWidget):
         self.pages.addWidget(w)
 
     def set_cell_computing(self, busy: bool, text: str = ""):
-        self.set_working(busy, text or "Finding the cell ...")
+        self.set_working(busy, text or "Finding the cell ...", job="cell")
 
     # ------------------------------------------------------------------ 4 compartments
     def _build_compartments(self):
@@ -652,7 +667,7 @@ class WorkflowPanel(QWidget):
             cb = QCheckBox(name)
             cb.setChecked(True)
             cb.setStyleSheet(f"QCheckBox {{ color: {theme.readable(color)}; }}")
-            cb.toggled.connect(lambda *_: self.main.update_compartment_display())
+            cb.toggled.connect(self._toggled)
             self.show_box[key] = cb
             grid.addWidget(cb, k // 3, k % 3)
         lay.addLayout(grid)
@@ -661,13 +676,13 @@ class WorkflowPanel(QWidget):
         self.target_box: dict[str, QCheckBox] = {}
         self.front_box = QCheckBox("Front direction")
         self.front_box.setStyleSheet(f"QCheckBox {{ color: {theme.readable('#FF8C00')}; }}")
-        self.front_box.setToolTip("Arrow from the cell centre towards the actin-weighted centre (polarity)")
+        self.front_box.setToolTip("Arrow from the cell centre towards the actin-rich part (polarity). Long and "
+                                  "bold for a clear front, short and thin when the cell is nearly even (D84)")
         self.front_box.toggled.connect(lambda *_: self.main.update_compartment_display())
         self.outline_box = QCheckBox("Outlines only")
         self.outline_box.setChecked(True)
         self.only_menu = QComboBox()
-        self.only_menu.addItems(["Show all", "Only nucleus", "Only actin", "Only actin-rich", "Only cytoplasm",
-                                 "Only target mask"])
+        self.only_menu.addItems(list(ONLY_ITEMS) + ["Own selection"])
         lay.addLayout(_row(self.outline_box, self.only_menu))
         self.comp_channels = QHBoxLayout()
         lay.addLayout(self.comp_channels)
@@ -679,7 +694,7 @@ class WorkflowPanel(QWidget):
         form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
         self.factor = {}
         for key, text in (("nucleus", "Nucleus edge"), ("actin", "Actin"), ("actin_rich", "Actin-rich"),
-                          ("target", "Target mask")):
+                          ("target", "Target mask"), ("comparison", "Comparison mask")):
             sb = _factor_box("Threshold factor: below 1 makes the mask larger, above 1 smaller")
             sb.valueChanged.connect(self._factor_changed)
             self.factor[key] = sb
@@ -689,8 +704,8 @@ class WorkflowPanel(QWidget):
         self.factors_all_btn = button("Use these factors for all cells",
                                       tip="Make these factors the starting values of the analysis")
         lay.addLayout(_row(self.defaults_btn, self.factors_all_btn))
-        lay.addWidget(label("The target mask marks the clearly stained voxels for checking. The shares in step 5 "
-                            "use all of the target signal and do not depend on it.", "hint"))
+        self.target_hint = label("", "hint")
+        lay.addWidget(self.target_hint)
         self.comp_status = label("", "hint")
         lay.addWidget(self.comp_status)
         self.comp_notes = label("", "warn")       # shown in the alert line under the instruction
@@ -703,11 +718,21 @@ class WorkflowPanel(QWidget):
         self.defaults_btn.clicked.connect(self._defaults)
         self.factors_all_btn.clicked.connect(self.main.factors_as_default)
         self.outline_box.toggled.connect(lambda *_: self.main.update_compartment_display())
-        self.only_menu.currentIndexChanged.connect(self._only)
+        self.only_menu.activated.connect(self._only)     # also when the shown entry is chosen again (D87)
         self.pages.addWidget(w)
 
-    def set_targets(self, labels: list[str]):
-        """One checkbox per target mask, and the front direction."""
+    def set_targets(self, labels: list[str], comparisons: list[str] = ()):
+        """One checkbox per target and comparison mask, and the front direction. A mask that was shown stays
+        shown (D87)."""
+        comparisons = list(comparisons)
+        mode = getattr(self.main, "params", None)
+        self.target_hint.setText(
+            "The target mask marks the stained voxels. The shares in step 5 count the target signal inside it "
+            "(Settings > Masks), so correcting it changes the numbers." if mode is None or mode.target_signal == "mask"
+            else "The target mask marks the stained voxels for checking. The shares in step 5 use all of the "
+                 "target signal and do not depend on it (Settings > Masks).")
+        self.factor["comparison"].setEnabled(bool(comparisons))
+        was = {k: cb.isChecked() for k, cb in self.target_box.items()}
         for cb in self.target_box.values():
             cb.hide()
             cb.setParent(None)
@@ -715,26 +740,43 @@ class WorkflowPanel(QWidget):
         self.target_box = {}
         while self.target_row.count():
             self.target_row.takeAt(0)
-        for lab in labels:
-            cb = QCheckBox(f"Target mask {lab}")
-            cb.setChecked(False)
-            cb.toggled.connect(lambda *_: self.main.update_compartment_display())
+        for lab in list(labels) + comparisons:
+            cb = QCheckBox(f"{'Comparison' if lab in comparisons else 'Target'} mask {lab}")
+            cb.setChecked(was.get(lab, False))
+            cb.toggled.connect(self._toggled)
             self.target_box[lab] = cb
             self.target_row.addWidget(cb)
         self.target_row.addWidget(self.front_box)
         self.target_row.addStretch(1)
 
+    def _only_state(self, index: int) -> dict[str, bool]:
+        key = list(ONLY_ITEMS.values())[index]
+        out = {k: key is None or k == key for k in self.show_box}
+        out.update({f"target_{k}": key == "target" for k in self.target_box})
+        return out
+
     def _only(self, index: int):
-        keys = [None, "nucleus", "actin", "actin_rich", "cytoplasm", "target"]
-        key = keys[index]
+        if index >= len(ONLY_ITEMS):             # "Own selection" changes nothing
+            return
+        state = self._only_state(index)
         for k, cb in self.show_box.items():
             cb.blockSignals(True)
-            cb.setChecked(key is None or k == key)
+            cb.setChecked(state[k])
             cb.blockSignals(False)
-        for cb in self.target_box.values():
+        for k, cb in self.target_box.items():
             cb.blockSignals(True)
-            cb.setChecked(key == "target")
+            cb.setChecked(state[f"target_{k}"])
             cb.blockSignals(False)
+        self.main.update_compartment_display()
+
+    def _toggled(self, *_):
+        """A box ticked by hand: the menu names the matching entry or "Own selection" (D87)."""
+        now = {k: cb.isChecked() for k, cb in self.show_box.items()}
+        now.update({f"target_{k}": cb.isChecked() for k, cb in self.target_box.items()})
+        index = next((i for i in range(len(ONLY_ITEMS)) if self._only_state(i) == now), len(ONLY_ITEMS))
+        self.only_menu.blockSignals(True)
+        self.only_menu.setCurrentIndex(index)
+        self.only_menu.blockSignals(False)
         self.main.update_compartment_display()
 
     def visible_compartments(self) -> dict[str, bool]:
@@ -770,7 +812,7 @@ class WorkflowPanel(QWidget):
         self.main.compute()
 
     def set_computing(self, busy: bool, text: str = ""):
-        self.set_working(busy, text or "Computing the compartments ...")
+        self.set_working(busy, text or "Computing the compartments ...", job="compartments")
 
     # ------------------------------------------------------------------ 5 results
     def _build_results(self):
@@ -851,12 +893,23 @@ class WorkflowPanel(QWidget):
                               ("actin_rich", "    Actin-rich"), ("cytoplasm_without_actin", "  Without actin")):
                 rows.append((name, v[f"signal_{key}_pct"], v[f"volume_{key}_pct"], v[f"enrichment_{key}"], False))
             rows.append(("Zones (overlap)", None, None, None, True))
-            for key, name in (("envelope_zone", "  Nuclear envelope zone"), ("nucleus_interior", "  Nucleus interior"),
+            for key, name in (("envelope_zone", "  Nuclear envelope zone"), ("envelope_inner", "    inner half"),
+                              ("envelope_outer", "    outer half"), ("nucleus_interior", "  Nucleus interior"),
                               ("cortex_shell", "  Cortex shell"), ("basal_layer", "  Basal layer")):
-                rows.append((name, v[f"signal_{key}_pct"], v[f"volume_{key}_pct"], v[f"enrichment_{key}"], False))
+                if f"signal_{key}_pct" in v:
+                    rows.append((name, v[f"signal_{key}_pct"], v[f"volume_{key}_pct"], v[f"enrichment_{key}"], False))
             if "signal_front_pct" in v:
-                rows.append(("  Front half", v.get("signal_front_pct"), result.cell_values.get("volume_front_pct"),
-                             v.get("enrichment_front"), False))
+                vf = result.cell_values.get("volume_front_pct")
+                rows.append(("  Front half", v.get("signal_front_pct"), vf, v.get("enrichment_front"), False))
+                if "enrichment_rear" in v:
+                    sf = v.get("signal_front_pct")
+                    rows.append(("  Rear half", 100 - sf if sf == sf else None, 100 - vf if vf == vf else None,
+                                 v.get("enrichment_rear"), False))
+            for key in v:                             # D83: in the area of a comparison channel
+                if key.startswith("signal_in_") and key.endswith("_pct"):
+                    name = key[len("signal_in_"):-len("_pct")]
+                    rows.append((f"  In {name} area", v[key], v.get(f"volume_{name}_area_pct"),
+                                 v.get(f"enrichment_in_{name}"), False))
             rows.append(("  Target mask", v.get("target_mask_signal_pct"), v.get("target_mask_volume_pct"), None, False))
         if not self.main.state.accepted_current:      # a new result: can be accepted (again)
             self.accept_btn.setEnabled(True)
@@ -880,10 +933,23 @@ class WorkflowPanel(QWidget):
         cv = result.cell_values
         facts = [f"Cell {_fmt(cv.get('cell_volume_um3'))} µm³, nucleus {_fmt(cv.get('nucleus_volume_um3'))} µm³, "
                  f"height {_fmt(cv.get('cell_height_um'), '{:.1f}')} µm"]
+        p = self.main.params
+        facts.append("Shares count the target signal inside the target mask (Settings > Masks)."
+                     if p.target_signal == "mask" else "Shares count all target signal in the cell (Settings > Masks).")
         pi = cv.get("polarity_index")
         if pi is not None and pi == pi:
-            facts.append(f"Polarity index {pi:.2f} (about 0 = no front), actin in the front half "
-                         f"{_fmt(cv.get('actin_front_pct'))} %")
+            clear = "clear front" if pi >= p.polarity_clear_index else \
+                f"no clear front (below {p.polarity_clear_index:g}), the front values mean little"
+            facts.append(f"Polarity index {pi:.2f}: {clear}. Actin in the front half {_fmt(cv.get('actin_front_pct'))} %")
+        for target, v in result.target_values.items():
+            r = v.get("rear_to_front_ratio")
+            if r is not None and r == r:
+                facts.append(f"{target}: rear to front {r:.2f} (density, 1 = even, above 1 = more in the rear)")
+            pk = v.get("envelope_peak_um")
+            if pk is not None and pk == pk:
+                side = "outside" if pk > 0 else "inside"
+                facts.append(f"{target}: highest enrichment at {pk:+.2f} µm from the nucleus edge ({side}, "
+                             f"enrichment {_fmt(v.get('envelope_peak_enrichment'), '{:.2f}')})")
         for target, v in result.target_values.items():
             if "pcc_actin" in v:
                 m1 = v.get("m1_actin")
@@ -893,9 +959,10 @@ class WorkflowPanel(QWidget):
         for target, v in result.target_values.items():
             lo, hi = v.get("enrichment_nucleus_min"), v.get("enrichment_nucleus_max")
             if lo is not None and lo == lo and hi is not None and hi == hi:
+                edges = "the cell, nucleus and target edges" if p.target_signal == "mask" else "the cell and nucleus edges"
                 facts.append(f"{target}: enrichment nucleus {lo:.2f} to {hi:.2f}, signal nucleus "
                              f"{_fmt(v.get('signal_nucleus_pct_min'), '{:.1f}')} to "
-                             f"{_fmt(v.get('signal_nucleus_pct_max'), '{:.1f}')} % when the cell and nucleus edges "
+                             f"{_fmt(v.get('signal_nucleus_pct_max'), '{:.1f}')} % when {edges} "
                              "move (factor 0.8 to 1.2)")
         if not result.info.get("channel_offsets"):
             facts.append("Zones and heights without channel offset correction (Settings > Channel offset).")

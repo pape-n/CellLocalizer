@@ -165,6 +165,7 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
         raise ValueError("one channel assignment per channel is required")
     roles = _roles(assignments)
     targets = roles.get("Target", [])
+    comparisons = roles.get("Comparison", [])
     if not targets:
         raise ValueError("at least one channel needs the role Target")
     if len(roles.get("Nucleus", [])) > 1 or len(roles.get("Actin", [])) > 1 or len(roles.get("Membrane", [])) > 1:
@@ -284,9 +285,14 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
     actin_int = corrected(roles["Actin"][0]) if "Actin" in roles else None
     axis = None
     if params.polarity and actin_int is not None:
-        pol = polarity.polarity(cell, actin_int, nucleus, voxel)
+        front_mask = actin_rich if params.polarity_from == "actin_rich" else None     # D88
+        pol = polarity.polarity(cell, actin_int, nucleus, voxel, front_mask=front_mask,
+                                clear_index=params.polarity_clear_index)
         axis = pol.pop("_axis")
         cell_values.update(pol)
+    lateral = None
+    if params.envelope_lateral_only and nucleus.any():                               # D86 c
+        lateral = metrics.lateral_mask(d_nucleus, voxel) & cell
     cell_volume_median = {
         "cell_median_distance_nucleus_um": _median(d_nucleus[cell]),
         "cell_median_depth_um": _median(depth[cell]),
@@ -297,37 +303,49 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
     target_values: dict[str, dict] = {}
     profiles: dict[str, dict[str, list]] = {}
     target_masks: dict[str, np.ndarray] = {}
-    target_int: dict[str, np.ndarray] = {}
-    for i in targets:
+    target_int: dict[str, np.ndarray] = {}       # all signal, for colocalization and the hints
+    target_used: dict[str, np.ndarray] = {}      # the signal that is counted (D89)
+    in_mask = params.target_signal == "mask"
+    for i in targets + comparisons:              # a comparison channel is measured like a target (D83)
         label = assignments[i].label
+        mp = params.comparison if assignments[i].role == "Comparison" else params.target
         inten = corrected(i)
         target_int[label] = inten
-        target_values[label] = metrics.measure_target(
-            inten, labels, overlap, d_nucleus, depth, height, v0,
-            params.envelope_um, params.cortex_um, params.basal_um, actin_rich=actin_rich)
-        # target mask (D30): only a view on the brightest target signal, the shares above do not use it
+        # target mask (D30): the stained voxels. Since D89 the shares count only the signal inside it.
         key = f"target_{label}"
         if key in masks:
             tmask = np.asarray(masks[key], bool) & cell
             thresholds[key] = float("nan")
-        elif segmentation.has_signal(segmentation.smooth(inten, voxel, params.target.sigma_um), inten, voxel,
-                                     params.target.sigma_um):
-            tmask, thresholds[key] = segmentation.segment_actin(inten, voxel, params.target, cell)
+        elif segmentation.has_signal(segmentation.smooth(inten, voxel, mp.sigma_um), inten, voxel, mp.sigma_um):
+            tmask, thresholds[key] = segmentation.segment_actin(inten, voxel, mp, cell)
         else:
             # no staining above noise (D53): a threshold would still mark a third of the cell
             tmask, thresholds[key] = np.zeros(shape, bool), float("nan")
         target_masks[label] = tmask
+        used = np.where(tmask, inten, 0.0) if in_mask else inten
+        target_used[label] = used
+        target_values[label] = {"role": assignments[i].role, **metrics.measure_target(
+            used, labels, overlap, d_nucleus, depth, height, v0,
+            params.envelope_um, params.cortex_um, params.basal_um, actin_rich=actin_rich, envelope_keep=lateral)}
         measures = metrics.target_mask_measures(inten, labels, tmask, voxel)
         if not tmask.any() and np.isnan(thresholds[key]):
             measures = {k: float("nan") for k in measures}
         target_values[label].update(measures)
         profiles[label] = {
-            "distance_to_nucleus_surface": metrics.profile(inten, d_nucleus, cell, params.profile_bin_um),
-            "depth_below_cell_surface": metrics.profile(inten, depth, cell, params.profile_bin_um),
-            "height_above_substrate": metrics.profile(inten, height, cell, params.profile_bin_um),
+            "distance_to_nucleus_surface": metrics.profile(used, d_nucleus, cell, params.profile_bin_um),
+            "depth_below_cell_surface": metrics.profile(used, depth, cell, params.profile_bin_um),
+            "height_above_substrate": metrics.profile(used, height, cell, params.profile_bin_um),
         }
+        peak_rows = profiles[label]["distance_to_nucleus_surface"]
+        if lateral is not None:
+            peak_rows = metrics.profile(used, d_nucleus, lateral, params.profile_bin_um)
+        peak = metrics.profile_peak(peak_rows)
+        target_values[label]["envelope_peak_um"] = peak                               # D86 b
+        target_values[label]["envelope_peak_enrichment"] = next(
+            (r["enrichment"] for r in peak_rows if np.isfinite(peak) and r["bin_start_um"] <= peak < r["bin_end_um"]),
+            float("nan"))
         if params.polarity and actin_int is not None:
-            target_values[label].update(polarity.target_front(inten, cell, axis, voxel))
+            target_values[label].update(polarity.target_front(used, cell, axis, voxel))
         if params.colocalization and actin_int is not None:
             c = coloc.colocalization(inten, actin_int, cell)
             target_values[label].update({"pcc_actin": c["pcc"], "m1_actin": c["m1"], "m2_actin": c["m2"],
@@ -335,6 +353,14 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
                                          "costes_threshold_actin": c["threshold_b"],
                                          "zero_voxels_target_pct": c["zero_a_pct"],
                                          "zero_voxels_actin_pct": c["zero_b_pct"]})
+
+    # each target in the area of each comparison channel (D83)
+    for j in comparisons:
+        name = assignments[j].label
+        for i in targets:
+            label = assignments[i].label
+            target_values[label].update(metrics.comparison_measures(
+                target_used[label], cell, target_masks[name], target_masks[label], name))
 
     # two targets against each other (D35)
     if params.colocalization and len(target_int) > 1:
@@ -373,16 +399,31 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
                 variants.append(metrics.compartment_labels(c_box, nucleus & c_box, a_box))
         for f, n_box in nucleus_variants.items():
             variants.append(metrics.compartment_labels(cell, n_box, actin))
-        for label, inten in target_int.items():
+        # D89: with the shares from the target mask, the target edge moves as well (factor 0.8 and 1.2)
+        target_variants: dict[str, list] = {}
+        if in_mask:
+            for i in targets + comparisons:
+                label = assignments[i].label
+                mp = params.comparison if assignments[i].role == "Comparison" else params.target
+                if f"target_{label}" in masks or not np.isfinite(thresholds.get(f"target_{label}", float("nan"))):
+                    continue
+                sm = segmentation.smooth(target_int[label], voxel, mp.sigma_um)
+                thr = thresholds[f"target_{label}"]
+                target_variants[label] = [
+                    np.where(segmentation.remove_small((sm > thr * s) & cell, voxel, mp.min_volume_um3),
+                             target_int[label], 0.0)
+                    for s in SENSITIVITY_FACTORS]
+        for label, inten in target_used.items():
             base = target_values[label]
             spans = [metrics.compartment_shares(inten, lab_v) for lab_v in variants]
+            spans += [metrics.compartment_shares(v, labels) for v in target_variants.get(label, [])]
             for key in metrics.SENSITIVITY_KEYS:
                 vals = [v[key] for v in spans if np.isfinite(v[key])]
                 if vals and np.isfinite(base.get(key, float("nan"))):
                     vals.append(base[key])     # no variant (e.g. corrected masks): empty, not a zero-width span
                 base[f"{key}_min"] = min(vals) if vals else float("nan")
                 base[f"{key}_max"] = max(vals) if vals else float("nan")
-        cell_values["sensitivity_variants"] = len(variants)
+        cell_values["sensitivity_variants"] = len(variants) + max((len(v) for v in target_variants.values()), default=0)
 
     def embed(m: np.ndarray) -> np.ndarray:
         out = np.zeros(full_cell.shape, m.dtype)
@@ -426,9 +467,15 @@ def analyze_cell(stack: ImageStack, assignments: list[ChannelAssignment], params
     if axis is not None:
         cy, cx = axis["centre_um"]
         uy, ux = axis["unit"]
-        rad = axis["radius_um"]
+        index = float(axis.get("index", 1.0))
+        clear = index >= params.polarity_clear_index
+        # D84: the arrow is as long as the polarity is clear, full radius at twice the threshold
+        full = 2.0 * params.polarity_clear_index if params.polarity_clear_index > 0 else 1.0
+        rad = axis["radius_um"] * min(1.0, max(0.15, index / full))
         overlays["polarity"] = {"start": (cy / voxel[1] + y0, cx / voxel[2] + x0),
-                                "end": ((cy + uy * rad) / voxel[1] + y0, (cx + ux * rad) / voxel[2] + x0)}
+                                "end": ((cy + uy * rad) / voxel[1] + y0, (cx + ux * rad) / voxel[2] + x0),
+                                "index": index, "clear": bool(clear), "width": 3.0 if clear else 1.0,
+                                "color": "#FF8C00" if clear else "#FF8C0099"}
     labels_present = {a.label for a in assignments}
     applied = [c for c in params.crosstalk if c["k"] > 0 and {c["into"], c["from"]} <= labels_present]
     if applied:
@@ -458,8 +505,9 @@ def _acquisition_by_label(stack: ImageStack, assignments: list[ChannelAssignment
 NUCLEUS_KEYS = (["nucleus_volume_um3", "cytoplasm_volume_um3", "cytoplasm_without_actin_volume_um3",
                  "overlap_nucleus_actin_um3", "signal_overlap_nucleus_actin_pct",
                  "target_mask_nucleus_pct", "target_mask_cytoplasm_pct", "target_mask_cytoplasm_without_actin_pct"]
+                + ["envelope_peak_um", "envelope_peak_enrichment"]
                 + [f"{q}_{c}{s}" for c in ("nucleus", "cytoplasm", "cytoplasm_without_actin",
-                                           "envelope_zone", "nucleus_interior")
+                                           "envelope_zone", "envelope_inner", "envelope_outer", "nucleus_interior")
                    for q, s in (("signal", "_pct"), ("volume", "_pct"), ("enrichment", ""), ("mean", ""))]
                 + [f"{k}_{m}" for k in ("signal_nucleus_pct", "enrichment_nucleus", "signal_cytoplasm_pct",
                                          "enrichment_cytoplasm") for m in ("min", "max")])

@@ -89,14 +89,35 @@ def crash_log_path() -> Path:
     return user_config_dir() / "crash.log"
 
 
+CLEAN_EXIT = "closed normally"
+CRASH_MARKERS = ("Fatal Python error", "Traceback", "Windows fatal exception", "most recent call first")
+
+
+def previous_crash_text(text: str) -> str | None:
+    """The text of a log left by a crash, or None for a normal end. A run that wrote no clean-exit line
+    ended unexpectedly as well (killed for memory, frozen and ended in the task manager, power off), and
+    a native crash on Windows reads "Windows fatal exception" without "Fatal Python error" (D87)."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    if any(m in text for m in CRASH_MARKERS):
+        return text[-8000:]
+    if CLEAN_EXIT not in lines[-1]:
+        return text[-8000:] + "\n(no clean exit: the program was ended or crashed without a message)"
+    return None
+
+
 def _install_crash_log() -> str | None:
     """Write native crashes and unhandled errors to crash.log. Returns the text of a log left by
-    a previous crash, so the program can point to it once."""
+    a previous crash, so the program can point to it once. The old log is kept as crash_previous.log
+    before the new one is started, so a crash is never overwritten."""
     path = crash_log_path()
     previous = None
     try:
         if path.exists() and path.stat().st_size > 0:
-            previous = path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            previous = previous_crash_text(path.read_text(encoding="utf-8", errors="replace"))
+            if previous:
+                path.with_name("crash_previous.log").write_text(previous, encoding="utf-8")
         fh = open(path, "w", encoding="utf-8")
         fh.write(f"{APP_NAME} {__version__} started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         fh.flush()
@@ -112,9 +133,19 @@ def _install_crash_log() -> str | None:
         _install_crash_log.handle = fh
     except OSError:
         pass
-    if previous and ("Fatal Python error" in previous or "Traceback" in previous):
-        return previous
-    return None
+    return previous
+
+
+def _log_clean_exit() -> None:
+    fh = getattr(_install_crash_log, "handle", None)
+    if fh is None:
+        return
+    try:
+        faulthandler.disable()
+        fh.write(f"{CLEAN_EXIT} {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fh.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def _log_napari_errors() -> None:
@@ -194,11 +225,8 @@ def run_gui(argv=None, smoke_report: str | None = None) -> int:
         window.show_analysis_window()
     else:
         window.show_start()
+    app.aboutToQuit.connect(_log_clean_exit)
     if previous_crash and not smoke_report:
-        try:
-            crash_log_path().with_name("crash_previous.log").write_text(previous_crash, encoding="utf-8")
-        except OSError:
-            pass
         window.message("The program ended unexpectedly last time. The details are in\n"
                        f"{crash_log_path().with_name('crash_previous.log')}\nPlease send this file along.")
 
@@ -245,6 +273,8 @@ class MainWindow:
         self._image_layers = []
         self._target_layers: dict[str, object] = {}
         self._worker = None
+        self._cameras: dict[int, tuple] = {}         # last 2D and 3D view of this image (D87)
+        self._front_pending = None                   # polarity arrow waiting for the 2D view
         self._batch = None
         self._saving = False
         self._save_again = False
@@ -284,13 +314,27 @@ class MainWindow:
         self.viewer.window._qt_window.installEventFilter(self._close_guard)
 
     def confirm_close(self) -> bool:
-        """True if the program may close now."""
+        """True if the program may close now. A second close while the first one waits is ignored."""
+        if getattr(self, "_closing", False):
+            return False
+        self._closing = True
+        try:
+            return self._confirm_close()
+        finally:
+            self._closing = False
+
+    def _confirm_close(self) -> bool:
         from qtpy.QtWidgets import QApplication, QMessageBox
 
         if self._batch is not None:
             if not self.ask("A calculation is still running. Stop it and quit?", "Stop and quit"):
                 return False
             self._batch.quit()
+        if self.state.computing or self.panel._working:      # D87: napari waits for running workers
+            t0 = time.perf_counter()
+            while (self.state.computing or self.panel._working) and time.perf_counter() - t0 < 30:
+                QApplication.processEvents()
+                time.sleep(0.05)
         if self._unsaved():
             n = (len(self.pending) if self.session_dir is not None else
                  sum(1 for im in self.session.images for c in im.cells if c.status != batch.EXCLUDED))
@@ -319,6 +363,13 @@ class MainWindow:
         from localization_tool.gui.workflow import WorkflowPanel
 
         self.panel = WorkflowPanel(self)
+        try:                                          # 2D/3D only through the buttons (D87)
+            from napari.utils.action_manager import action_manager
+
+            action_manager.unbind_shortcut("napari:toggle_ndisplay")
+        except Exception:
+            pass
+        self.viewer.dims.events.ndisplay.connect(self._ndisplay_event)
         theme.style(self.panel)
         self.dock = self.viewer.window.add_dock_widget(self.panel, name="Workflow", area="right")
         self._reduce_ui()
@@ -382,7 +433,7 @@ class MainWindow:
             pass
         # dropped files go through our reader, not through napari's
         qv._open_from_list_of_urls_data = lambda urls, stack=False, choose_plugin=False: self._open_dropped(urls)
-        self.viewer.text_overlay.text = ("Add a folder or images with the buttons on the right, or drop .czi files here.\n"
+        self.viewer.text_overlay.text = ("Add a folder or images with the buttons on the right, or drop .czi or .nd2 files here.\n"
                                          "Help > How to use explains the steps.")
         self.viewer.text_overlay.position = "top_center"
         self.viewer.text_overlay.font_size = 14
@@ -585,7 +636,7 @@ class MainWindow:
         elif any(p.name.endswith(".lta.json") for p in paths):
             self.open_analysis(next(p for p in paths if p.name.endswith(".lta.json")))
         else:
-            self.message("Please drop .czi or .tif files, or an analysis file (.lta.json).")
+            self.message("Please drop .czi, .nd2 or .tif files, or an analysis file (.lta.json).")
 
     def _show_log_folder(self) -> None:
         self.message(f"Settings, panels and the crash log are in:\n{user_config_dir()}")
@@ -678,12 +729,14 @@ class MainWindow:
         if previous == 2 and step != 2:
             if self._drawing:
                 self.apply_exclusions()
-        self._set_visible(self.LABEL_LAYER, step == 3)
+        # masks are shown again only with a result of this cell (D87: no masks of the previous cell)
+        self._set_visible(self.LABEL_LAYER, False)
         self._set_visible(self.FRONT_LAYER, False)
         for layer in self._target_layers.values():
-            layer.visible = False
+            _set_if(layer, "visible", False)
         self._hide_surfaces()
-        self._set_visible(self.CELL_LAYER, step in (2, 3))
+        self._set_visible(self.CELL_LAYER, False)
+        self._show_cell_3d(step == 2 and self.viewer.dims.ndisplay == 3)
         if step == 2:
             self._update_box()
             self.panel.cell_error.setText("")
@@ -702,9 +755,9 @@ class MainWindow:
             im = self._current_image()
             spec = next((c for c in im.cells if c.name == self.state.editing), None) if im else None
             done = "Excluded" if spec is not None and spec.status == batch.EXCLUDED else "Accepted"
-            self.panel.accept_btn.setText(done if self.state.accepted_current else "Accept cell")
             checked = spec is not None and str(spec.status).startswith("accepted")
-            self.panel.accept_btn.setText("Save changes to cell" if checked else "Accept cell")
+            self.panel.accept_btn.setText(done if self.state.accepted_current else
+                                          "Save changes to cell" if checked else "Accept cell")
 
     def _crop_key(self) -> tuple:
         b = self.state.box
@@ -745,7 +798,7 @@ class MainWindow:
         self._surface_key = None
         self._drawing = False
         self.viewer.text_overlay.text = ("Add a folder or images with the buttons on the right, or drop .czi "
-                                         "files here.\nHelp > How to use explains the steps.")
+                                         "or .nd2 files here.\nHelp > How to use explains the steps.")
         self.viewer.text_overlay.visible = True
         self.panel.accepted_info.setText("")
         self.panel.show_info(None, 0.0, "", "")
@@ -1033,7 +1086,7 @@ class MainWindow:
         stack = make_practice_cell()
         im = self.session.images[index]
         if im.assignments is None:
-            roles = [("Target", "TTN", DISPLAY_COLORS["Magenta"]), ("Target", "VIM", DISPLAY_COLORS["Orange"]),
+            roles = [("Target", "TTN", DISPLAY_COLORS["Magenta"]), ("Comparison", "VIM", DISPLAY_COLORS["Orange"]),
                      ("Actin", "Actin", DISPLAY_COLORS["Green"]), ("Nucleus", "Nucleus", DISPLAY_COLORS["Blue"])]
             im.assignments = [ChannelAssignment(*r) for r in roles]
         self.set_image(stack, time.perf_counter() - t0, None, index)
@@ -1069,7 +1122,8 @@ class MainWindow:
                              shown=self.session.shown_name(im) if im is not None else None,
                              hidden=self._hidden(im))
         self.panel.populate_channels(stack, self.state.assignments, note)
-        self.panel.set_targets([a.label for a in self.state.assignments if a.role == "Target"])
+        self.panel.set_targets([a.label for a in self.state.assignments if a.role == "Target"],
+                               [a.label for a in self.state.assignments if a.role == "Comparison"])
         self.panel.accepted_info.setText("")
         shown = self.session.shown_name(im) if im is not None else stack.display_name
         self.status(f"{shown} loaded in {load_seconds:.1f} s")
@@ -1084,6 +1138,8 @@ class MainWindow:
         self._target_layers = {}
         self._surfaces = {}
         self._surface_key = None
+        self._cameras = {}
+        self._front_pending = None
         for ch, a in zip(stack.channels, self.state.assignments):
             data = stack.data[ch.index]
             lo, hi = _contrast(data)
@@ -1173,16 +1229,34 @@ class MainWindow:
         return [layer for layer in self._image_layers if layer in self.viewer.layers]
 
     def apply_assignments(self, assignments: list[ChannelAssignment]) -> None:
-        """Update names, colours and visibility in place. No image layer is rebuilt."""
+        """Update names, colours and visibility in place. No image layer is rebuilt. The result is dropped
+        only when a role or a name changed, a channel is shown again only when it leaves "Ignore" (D87)."""
+        old = list(self.state.assignments or [])
         self.state.assignments = assignments
-        self.state.result = None
-        self.state.cell_key = None
-        for layer, a in zip(self._image_layers, assignments):
+        same = len(old) == len(assignments) and all(
+            (o.role, o.label) == (a.role, a.label) for o, a in zip(old, assignments))
+        if same and [o.color for o in old] == [a.color for a in assignments]:
+            return
+        for layer, a, o in zip(self._image_layers, assignments, old or [None] * len(assignments)):
             if layer.name != a.label:
                 layer.name = a.label
             layer.colormap = _colormap(a)
             layer.metadata["role"] = a.role
-            layer.visible = a.role != "Ignore"
+            if o is None or (o.role == "Ignore") != (a.role == "Ignore"):
+                _set_if(layer, "visible", a.role != "Ignore")
+        if same:                                  # only colours changed: masks and numbers stay
+            for label, tl in self._target_layers.items():
+                col = next((a.color for a in assignments if a.label == label), None)
+                if col:
+                    tl.colormap = _label_cmap({1: (*_hex_to_rgb(col), 1)})
+            for layer in self._surfaces.values():
+                if layer in self.viewer.layers:
+                    self.viewer.layers.remove(layer)
+            self._surfaces, self._surface_key = {}, None
+            self.update_compartment_display()
+            return
+        self.state.result = None
+        self.state.cell_key = None
         self._align_layers()
         for layer in list(self._target_layers.values()) + list(self._surfaces.values()):
             if layer in self.viewer.layers:
@@ -1190,10 +1264,12 @@ class MainWindow:
         self._target_layers = {}
         self._surfaces = {}
         self._surface_key = None
-        self.panel.set_targets([a.label for a in assignments if a.role == "Target"])
+        self.panel.set_targets([a.label for a in assignments if a.role == "Target"],
+                               [a.label for a in assignments if a.role == "Comparison"])
         self.panel.refresh()
 
     def set_brightness(self, layer, factor: float) -> None:
+        layer.metadata["brightness"] = float(factor)        # the slider shows it again (D87)
         lo, hi = layer.metadata.get("auto_lo", 0.0), layer.metadata.get("auto_hi", 1.0)
         layer.contrast_limits = (lo, max(lo + 1e-6, lo + (hi - lo) / factor))
 
@@ -1204,13 +1280,41 @@ class MainWindow:
             for layer in self.viewer.layers:
                 if hasattr(layer, "contour") and layer.contour:
                     layer.contour = 0
-        self.viewer.dims.ndisplay = n
+        old = self.viewer.dims.ndisplay
+        cam = self.viewer.camera
+        if old != n:                                 # napari fits the view on every switch: keep each view (D87)
+            self._cameras[old] = (tuple(cam.center), float(cam.zoom), tuple(cam.angles))
+        self._setting_nd = True
+        try:
+            self.viewer.dims.ndisplay = n
+        finally:
+            self._setting_nd = False
+        if old != n and n in self._cameras:
+            center, zoom, angles = self._cameras[n]
+            if len(center) == len(cam.center):
+                cam.center = center
+            cam.zoom = zoom
+            if n == 3:
+                cam.angles = angles
         self._set_visible(self.EXCLUDE_LAYER, n == 2)        # the drawn shapes are 2D, they float in 3D
         if self.panel.step == 3:
             self.update_compartment_display()
         elif self.panel.step == 2:
             self._show_cell_3d(n == 3)
         self.panel.refresh()
+
+    def _ndisplay_event(self, event=None) -> None:
+        """2D/3D switched by napari itself (a shortcut): go through set_ndisplay, which prepares the
+        layers for 3D (D87)."""
+        if getattr(self, "_setting_nd", False):
+            return
+        n = self.viewer.dims.ndisplay
+        self._setting_nd = True
+        try:
+            self.viewer.dims.ndisplay = 5 - n            # back, without the layers prepared
+        finally:
+            self._setting_nd = False
+        self.set_ndisplay(n)
 
     def reset_view(self) -> None:
         self.viewer.reset_view()
@@ -1253,7 +1357,8 @@ class MainWindow:
         layer = self._layer(self.EXCLUDE_LAYER)
         if layer is None:
             return
-        self.viewer.dims.ndisplay = 2
+        if self.viewer.dims.ndisplay != 2:
+            self.set_ndisplay(2)                     # with the 2D state of all layers (D87)
         layer.current_edge_color = EXCLUDE_EDIT["edge_color"]
         layer.current_face_color = EXCLUDE_EDIT["face_color"]
         if len(layer.data):
@@ -1380,7 +1485,7 @@ class MainWindow:
         data[b.z0:b.z1, b.y0:b.y1, b.x0:b.x1] = s.cell.astype(np.uint8)
         layer.data = data
         layer.refresh()
-        layer.visible = True
+        _set_if(layer, "visible", True)
         dz, dy, dx = s.full.voxel_um
         vol = float(s.cell.sum()) * dz * dy * dx
         planes = int(s.cell.reshape(s.cell.shape[0], -1).any(axis=1).sum())
@@ -1498,7 +1603,7 @@ class MainWindow:
         layer.data = data
         layer.refresh()
         colors = {a.label: a.color for a in self.state.assignments}
-        for label in [a.label for a in self.state.assignments if a.role == "Target"]:
+        for label in [a.label for a in self.state.assignments if a.role in ("Target", "Comparison")]:
             t = result.masks.get(f"target_{label}")
             if t is None:
                 continue
@@ -1509,23 +1614,32 @@ class MainWindow:
             tl.data = d
             tl.refresh()
         self._select_image_layer()
-        front = self._layer(self.FRONT_LAYER)
         pol = result.overlays.get("polarity")
-        if front is not None:
-            if pol:
-                p0 = np.array(pol["start"]) + (b.y0, b.x0)
-                p1 = np.array(pol["end"]) + (b.y0, b.x0)
-                v = p1 - p0
-                n = float(np.hypot(*v)) or 1.0
-                u, w = v / n, np.array([-v[1], v[0]]) / n
-                head = 0.12 * n
-                front.data = []
-                front.add_paths([np.array([p0, p1 - u * head])], edge_width=3, edge_color="#FF8C00")
-                front.add_polygons([np.array([p1, p1 - u * head + w * head * 0.5, p1 - u * head - w * head * 0.5])],
-                                   edge_width=1, edge_color="#FF8C00", face_color="#FF8C00")
-            else:
-                front.data = []
+        self._front_pending = (pol, (b.y0, b.x0))     # drawn in 2D only: the shapes layer is 2D (D87)
         self.update_compartment_display()
+
+    def _draw_front(self) -> None:
+        front = self._layer(self.FRONT_LAYER)
+        pending, self._front_pending = self._front_pending, None
+        if front is None or pending is None:
+            return
+        pol, (y0, x0) = pending
+        front.data = []
+        if not pol:
+            return
+        p0 = np.array(pol["start"]) + (y0, x0)
+        p1 = np.array(pol["end"]) + (y0, x0)
+        v = p1 - p0
+        n = float(np.hypot(*v))
+        if n <= 0:
+            return
+        u, w = v / n, np.array([-v[1], v[0]]) / n
+        head = max(0.12 * n, 3.0)
+        width = pol.get("width", 3.0)
+        color = pol.get("color", "#FF8C00")
+        front.add_paths([np.array([p0, p1 - u * head])], edge_width=width, edge_color=color)
+        front.add_polygons([np.array([p1, p1 - u * head + w * head * 0.5, p1 - u * head - w * head * 0.5])],
+                           edge_width=1, edge_color=color, face_color=color)
 
     def update_compartment_display(self) -> None:
         """Show or hide single compartments, the cell edge and the target masks (step 4).
@@ -1549,17 +1663,19 @@ class MainWindow:
                           LABEL_COLORS[2] if show["actin"] else cyto)}
             layer.colormap = _label_cmap(colors)
             _set_if(layer, "contour", 1 if outlines and not three_d else 0)
-            layer.visible = not three_d
+            _set_if(layer, "visible", not three_d)
         cell = self._layer(self.CELL_LAYER)
         if cell is not None:
-            cell.visible = vis.get("cell", True) and not three_d
+            _set_if(cell, "visible", vis.get("cell", True) and not three_d)
             _set_if(cell, "contour", 0 if three_d else 1)
         for label, tl in self._target_layers.items():
-            tl.visible = vis.get(f"target_{label}", False) and not three_d
+            _set_if(tl, "visible", vis.get(f"target_{label}", False) and not three_d)
             _set_if(tl, "contour", 1 if outlines and not three_d else 0)
         front = self._layer(self.FRONT_LAYER)
         if front is not None:
-            front.visible = vis.get("front", False) and len(front.data) > 0 and not three_d
+            if not three_d and self._front_pending is not None:
+                self._draw_front()
+            _set_if(front, "visible", vis.get("front", False) and len(front.data) > 0 and not three_d)
         self.panel.outline_box.setEnabled(not three_d)        # outlines and the arrow exist only in 2D
         self.panel.front_box.setEnabled(not three_d)
         if three_d:
@@ -1576,7 +1692,7 @@ class MainWindow:
         out = {"cell": r.masks["cell"], "nucleus": lab == 1, "actin": np.isin(lab, (2,)),
                "actin_rich": r.masks["actin_rich"], "cytoplasm": np.isin(lab, (2, 3))}
         for a in self.state.assignments:
-            if a.role == "Target" and f"target_{a.label}" in r.masks:
+            if a.role in ("Target", "Comparison") and f"target_{a.label}" in r.masks:
                 out[f"target_{a.label}"] = r.masks[f"target_{a.label}"]
         return out
 
@@ -1585,13 +1701,15 @@ class MainWindow:
         r = self.state.result
         if r is None or self.state.box is None:
             return
-        key = (id(r), self.state.box)
-        if self._surface_key != key:
-            self._compute_surfaces(key)
+        key = (r, self.state.box)                    # the result itself: an id() can be reused (D87)
+        if self._surface_key is None or self._surface_key[0] is not r or self._surface_key[1] != key[1]:
+            running = getattr(self, "_surface_running", None)
+            if running is None or running[0] is not r or running[1] != key[1]:
+                self._compute_surfaces(key)
             return
         for name, layer in self._surfaces.items():
             if layer in self.viewer.layers:
-                layer.visible = vis.get(name, False) if not name.startswith("target_") else vis.get(name, False)
+                _set_if(layer, "visible", vis.get(name, False) if not name.startswith("target_") else vis.get(name, False))
 
     def _compute_surfaces(self, key) -> None:
         from localization_tool.gui.surfaces import mask_surfaces
@@ -1601,8 +1719,15 @@ class MainWindow:
         b = self.state.box
         offset = (b.z0 * voxel[0], b.y0 * voxel[1], b.x0 * voxel[2])
 
+        seq = getattr(self, "_load_seq", 0)
+        self._surface_running = key
+
         def done(meshes):
-            self.panel.set_working(False)
+            self.panel.set_working(False, job="surfaces")
+            if getattr(self, "_surface_running", None) is key:
+                self._surface_running = None
+            if self.state.result is not key[0] or getattr(self, "_load_seq", 0) != seq:
+                return                               # another cell or image meanwhile: drop (D87)
             for layer in self._surfaces.values():
                 if layer in self.viewer.layers:
                     self.viewer.layers.remove(layer)
@@ -1622,16 +1747,18 @@ class MainWindow:
             self.update_compartment_display()
 
         def failed(exc):
-            self.panel.set_working(False)
+            self.panel.set_working(False, job="surfaces")
+            if getattr(self, "_surface_running", None) is key:
+                self._surface_running = None
             self.message(f"The 3D surfaces could not be computed:\n{exc}", error=True)
 
-        self.panel.set_working(True, "Computing the 3D surfaces ...")
+        self.panel.set_working(True, "Computing the 3D surfaces ...", job="surfaces")
         self._run(mask_surfaces, (masks, voxel), {}, done, failed, False)
 
     def _hide_surfaces(self) -> None:
         for layer in self._surfaces.values():
             if layer in self.viewer.layers:
-                layer.visible = False
+                _set_if(layer, "visible", False)
 
     def _show_cell_3d(self, on: bool) -> None:
         """Step 3 in 3D: the cell edge as labels without contour (contours exist only in 2D)."""
@@ -1838,13 +1965,17 @@ class MainWindow:
             self._set_params(dlg.result_params, ask=True)
 
     def _set_params(self, params: AnalysisParams, ask: bool) -> None:
-        """New settings for the analysis. Cells computed with other settings can be recomputed."""
+        """New settings for the analysis. Cells computed with other settings can be recomputed. The
+        factors shown for the open cell stay as they are, unless they were the old defaults (D87)."""
+        s = self.state
+        if params.to_dict() == self.params.to_dict():
+            return                                   # OK without a change: keep the open cell as it is
+        shown = self._overrides() if s.full is not None else {}
         self.params = params
         self.session.params = params
         self._align_layers()
-        s = self.state
         if s.full is not None:
-            self.panel.set_factors(self._overrides_from_state(), self.base_factors())
+            self.panel.set_factors(shown, self.base_factors())
             s.cell_key = None
             s.result = None
         stale = [(i, c.name) for i, im in enumerate(self.session.images) for c in im.cells
@@ -1856,8 +1987,8 @@ class MainWindow:
                                       "outlines change are marked 'to check' and should be checked again.",
                                       "Compute again", "Later"):
             self.run_all("all")
-        elif s.full is not None and self.panel.step in (2, 3):
-            self.panel.go(self.panel.step)
+        elif s.full is not None and self.panel.step in (2, 3, 4):
+            self.panel.go(min(self.panel.step, 3))   # step 5 shows numbers of the old settings: back to 4
 
     def _overrides_from_state(self) -> dict:
         spec = None
@@ -2118,7 +2249,7 @@ class MainWindow:
     def _set_visible(self, name: str, visible: bool) -> None:
         layer = self._layer(name)
         if layer is not None:
-            layer.visible = visible
+            _set_if(layer, "visible", visible)
 
 
 _SEQ = itertools.count()

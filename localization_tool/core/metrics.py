@@ -62,11 +62,14 @@ def _ratio(a: float, b: float) -> float:
 def measure_target(intensity: np.ndarray, labels: np.ndarray, overlap: np.ndarray,
                    d_nucleus: np.ndarray, depth: np.ndarray, height: np.ndarray,
                    voxel_volume_um3: float, envelope_um: float, cortex_um: float, basal_um: float,
-                   actin_rich: np.ndarray | None = None) -> dict:
+                   actin_rich: np.ndarray | None = None, envelope_keep: np.ndarray | None = None) -> dict:
     """Signal shares, volume shares, enrichment and mean intensity per compartment and zone.
 
-    intensity is already background-subtracted. Shares in percent of the total signal in the cell.
-    Enrichment E = signal share / volume share (1 = as dense as the cell average).
+    intensity is already background-subtracted (and, with D89, zero outside the target mask). Shares in
+    percent of the total signal in the cell. Enrichment E = signal share / volume share (1 = as dense as
+    the cell average). The nuclear envelope zone is split at the nucleus edge into an inner half (inside
+    the nucleus mask) and an outer half (D86). envelope_keep limits the three envelope zones, e.g. to
+    the side of the nucleus (D86 c).
     """
     cell = labels > 0
     i_cell = intensity[cell]
@@ -88,10 +91,18 @@ def measure_target(intensity: np.ndarray, labels: np.ndarray, overlap: np.ndarra
     zones = {}
     if np.isfinite(d_nucleus[cell]).any():
         dn = d_nucleus
-        zones["envelope_zone"] = cell & (np.abs(dn) <= envelope_um)
+        env = cell & (np.abs(dn) <= envelope_um)
+        if envelope_keep is not None:
+            env = env & envelope_keep
+        inside = labels == NUCLEUS
+        zones["envelope_zone"] = env
+        zones["envelope_inner"] = env & inside
+        zones["envelope_outer"] = env & ~inside
         zones["nucleus_interior"] = cell & (dn < -envelope_um)
     else:
         zones["envelope_zone"] = None
+        zones["envelope_inner"] = None
+        zones["envelope_outer"] = None
         zones["nucleus_interior"] = None
     zones["actin_rich"] = (cell & actin_rich) if actin_rich is not None else None
     zones["cortex_shell"] = cell & (depth <= cortex_um)
@@ -132,6 +143,59 @@ def target_mask_measures(intensity: np.ndarray, labels: np.ndarray, tmask: np.nd
     lab, n = ndi.label(t)
     out["target_objects"] = int(n)
     out["target_object_volume_um3"] = float(t.sum()) * float(np.prod(voxel_um)) / n if n else float("nan")
+    return out
+
+
+def lateral_mask(d_nucleus: np.ndarray, voxel_um, max_tilt_deg: float = 45.0) -> np.ndarray:
+    """Voxels whose nearest nucleus surface is a side wall rather than the top or bottom (D86 c): the
+    normal of the surface (gradient of the signed distance) lies within max_tilt_deg of the plane of the
+    coverslip. Top and bottom carry the axial blur, about three times the lateral one."""
+    d = np.where(np.isfinite(d_nucleus), d_nucleus, 0.0).astype(np.float32)
+    gz, gy, gx = np.gradient(d, *[float(v) for v in voxel_um])
+    norm = np.sqrt(gz * gz + gy * gy + gx * gx)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        nz = np.abs(gz) / norm
+    return np.isfinite(nz) & (nz <= np.sin(np.radians(max_tilt_deg)))
+
+
+def profile_peak(rows: list[dict], lo: float = -1.0, hi: float = 1.0) -> float:
+    """Distance of the highest enrichment in a profile, between lo and hi µm, refined by a parabola
+    through the bin and its neighbours (D86 b). Negative = inside the nucleus. nan without a peak: when
+    the highest bin lies at the border of the window the profile only rises or falls there, the signal
+    has no maximum at the nucleus edge."""
+    pts = [((r["bin_start_um"] + r["bin_end_um"]) / 2, r["enrichment"]) for r in rows
+           if np.isfinite(r.get("enrichment", float("nan")))]
+    if len(pts) < 3:
+        return float("nan")
+    x = np.array([p[0] for p in pts])
+    y = np.array([p[1] for p in pts])
+    inside = np.flatnonzero((x >= lo) & (x <= hi))
+    if not inside.size:
+        return float("nan")
+    k = int(inside[np.argmax(y[inside])])
+    if k in (int(inside[0]), int(inside[-1])):
+        return float("nan")
+    if 0 < k < len(x) - 1 and np.isclose(x[k + 1] - x[k], x[k] - x[k - 1]):
+        y0, y1, y2 = y[k - 1], y[k], y[k + 1]
+        den = y0 - 2 * y1 + y2
+        if den < 0:
+            return float(x[k] + 0.5 * (y0 - y2) / den * (x[k + 1] - x[k]))
+    return float(x[k])
+
+
+def comparison_measures(intensity: np.ndarray, cell: np.ndarray, area: np.ndarray, tmask: np.ndarray | None,
+                        name: str) -> dict:
+    """Target against the area of a comparison channel (D83): share of the target signal in the area,
+    volume share of the area, enrichment, and the share of the target mask inside the area."""
+    cell = np.asarray(cell, bool)
+    area = np.asarray(area, bool) & cell
+    total = float(intensity[cell].sum())
+    f = _pct(float(intensity[area].sum()), total) if area.any() else float("nan")
+    phi = _pct(int(area.sum()), int(cell.sum()))
+    out = {f"signal_in_{name}_pct": f, f"volume_{name}_area_pct": phi, f"enrichment_in_{name}": _ratio(f, phi)}
+    if tmask is not None:
+        t = np.asarray(tmask, bool) & cell
+        out[f"target_mask_in_{name}_pct"] = _pct(int((t & area).sum()), int(t.sum())) if area.any() else float("nan")
     return out
 
 

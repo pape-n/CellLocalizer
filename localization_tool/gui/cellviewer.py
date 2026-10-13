@@ -74,6 +74,11 @@ class CellViewer(QWidget):
         super().__init__()
         self.setObjectName("page")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)      # D87: free the 3D view and its OpenGL context
+        self._closed = False
+        self._workers: set = set()
+        self._load_token = 0
+        self._mesh_job = None
         theme.style(self)
         theme.fit_to_screen(self, 1400, 860)
         self.path = Path(analysis_path)
@@ -148,24 +153,78 @@ class CellViewer(QWidget):
         if not self._cells:
             self.cell_info.setText("No cells. Untick 'Accepted cells only' to see cells that are still to check.")
 
-    def _open_row(self, row: int) -> None:
+    def _background(self, func, args: tuple, done, failed) -> None:
+        """Run in a worker thread, the window stays responsive (D87). Results that arrive after the
+        window was closed are dropped."""
+        from napari.qt.threading import create_worker
+
+        import weakref
+
+        worker = create_worker(func, *args, _start_thread=False)
+        self._workers.add(worker)                   # kept until finished: its signals must outlive the run
+        me = weakref.ref(self)                      # the worker must not keep a closed window alive (D87)
+        box = {"returned": done, "errored": failed}
+
+        def finish(kind, value):
+            worker._args, worker._kwargs = (), {}   # free the cell data held by the worker
+            fn = box.get(kind)
+            box.clear()                             # drop the callbacks, they hold the window
+            viewer = me()
+            if fn is not None and viewer is not None and not viewer._closed:
+                fn(value)
+
+        def forget():
+            viewer = me()
+            if viewer is not None:
+                viewer._workers.discard(worker)
+
+        worker.returned.connect(lambda r: finish("returned", r))
+        worker.errored.connect(lambda e: finish("errored", e))
+        worker.finished.connect(lambda: QTimer.singleShot(0, forget))
+        worker.start()
+
+    def wait_idle(self, seconds: float = 60.0) -> bool:
+        """For tests and exports: wait until loading and 3D surfaces are done."""
+        import time
+
+        t0 = time.perf_counter()
+        while (self._workers or self._mesh_job is not None) and time.perf_counter() - t0 < seconds:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        return not self._workers and self._mesh_job is None
+
+    def _open_row(self, row: int, sync: bool = False) -> None:
         if not (0 <= row < len(self._cells)):
             return
         im, spec = self._cells[row]
         if not im.path.exists():
             self.cell_info.setText(f"The image is not at its stored place:\n{im.path}")
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._load_token += 1
+        token = self._load_token
         self.cell_info.setText("Loading the image and the masks ...")
-        QApplication.processEvents()
-        try:
-            self.cell = cellview.load_cell(self.af, im, spec, self.base_dir)
-        except Exception as exc:              # a damaged file, a missing channel: say it, keep the window
-            self.cell = None
-            self.cell_info.setText(f"Could not open this cell:\n{exc}")
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
+
+        def done(cell):
+            if token == self._load_token:           # a row clicked later wins
+                self._show_cell(cell, im, spec)
+
+        def failed(exc):                            # a damaged file, a missing channel: say it, keep the window
+            if token == self._load_token:
+                self.cell = None
+                self.cell_info.setText(f"Could not open this cell:\n{exc}")
+
+        if sync:
+            try:
+                cell = cellview.load_cell(self.af, im, spec, self.base_dir)
+            except Exception as exc:
+                failed(exc)
+                return
+            done(cell)
+        else:
+            self._background(cellview.load_cell, (self.af, im, spec, self.base_dir), done, failed)
+
+    def _show_cell(self, cell, im, spec) -> None:
+        self.cell = cell
         from localization_tool.core.batch import needs_update
 
         stale = needs_update(spec, self.af.params)
@@ -528,7 +587,7 @@ class CellViewer(QWidget):
         self._model3d.camera.events.angles.connect(self._headlight, position="last")
 
     def _render_3d(self) -> None:
-        from localization_tool.gui.surfaces import mask_surface
+        from localization_tool.gui.surfaces import mask_surfaces
 
         self._ensure_3d()
         self.stack.setCurrentIndex(1)
@@ -549,15 +608,34 @@ class CellViewer(QWidget):
                 lay.visible = cv.visible
                 lay.contrast_limits = (cv.low, max(cv.high, cv.low + 1e-6))
                 lay.colormap = _cmap(cv.color, cv.label)
+        missing = [mv.name for mv in self.settings.masks
+                   if mv.visible and mv.name not in self._surfaces and mv.name in c.view_masks]
+        if missing:                                  # computed in the background (6 to 20 s for a real cell, D87)
+            job = (id(c), tuple(missing))
+            if self._mesh_job is None or self._mesh_job[0] != id(c):
+                self._mesh_job = job
+
+                def done(meshes, cell=c, job=job):
+                    if self._mesh_job is job:
+                        self._mesh_job = None
+                    if cell is self.cell:
+                        self._surfaces.update(meshes)
+                        if self.mode == "3d":
+                            self._render_3d()
+
+                def failed(exc, job=job):
+                    if self._mesh_job is job:
+                        self._mesh_job = None
+                    self.export_info.setText(f"3D surfaces could not be computed: {exc}")
+
+                self._background(mask_surfaces, ({n: c.view_masks[n] for n in missing}, c.voxel_um), done, failed)
+            self.export_info.setText("Computing the 3D surfaces ...")
         for mv in self.settings.masks:
             layer = self._surface_layers.get(mv.name)
             if mv.visible and layer is None:
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                try:
-                    mesh = self._surfaces.get(mv.name) or mask_surface(c.view_masks[mv.name], c.voxel_um)
-                finally:
-                    QApplication.restoreOverrideCursor()
-                self._surfaces[mv.name] = mesh
+                if mv.name not in self._surfaces:
+                    continue
+                mesh = self._surfaces[mv.name]
                 if mesh is None:
                     continue
                 layer = m.add_surface(mesh, name=f"3D {mv.name}", opacity=_surface_opacity(mv.style),
@@ -566,8 +644,32 @@ class CellViewer(QWidget):
                 self._headlight()
             if layer is not None:
                 layer.visible = mv.visible
-        self.export_info.setText("3D: drag to turn, scroll to zoom. The picture is saved as shown.")
+        if self._mesh_job is None:
+            self.export_info.setText("3D: drag to turn, scroll to zoom. The picture is saved as shown.")
         self._show_size(self._qt3d.width() * self.settings.scale, self._qt3d.height() * self.settings.scale)
+
+    def closeEvent(self, event):  # noqa: N802
+        """Free everything the window holds (D87): the timer, the camera connection, the 3D layers and the
+        napari view with its OpenGL context. Workers still running are left to finish, their results dropped."""
+        self._closed = True
+        try:
+            self._render_timer.stop()
+            if self._model3d is not None:
+                try:
+                    self._model3d.camera.events.angles.disconnect(self._headlight)
+                except Exception:
+                    pass
+                self._surface_layers = {}
+                self._model3d.layers.clear()
+            if self._qt3d is not None:
+                self._qt3d.close()
+                self._qt3d.deleteLater()
+            self._qt3d = self._model3d = None
+            self._surfaces = {}
+            self.cell = None
+            self._workers = set()                   # running workers finish on their own, results dropped
+        finally:
+            super().closeEvent(event)
 
     def _headlight(self, event=None) -> None:
         """Even lighting of the mask surfaces: the light comes from the camera, mostly ambient."""

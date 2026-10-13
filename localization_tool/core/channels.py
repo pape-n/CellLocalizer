@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .image import ChannelInfo
 
-ROLES = ("Nucleus", "Actin", "Target", "Membrane", "Other", "Ignore")
+ROLES = ("Nucleus", "Actin", "Target", "Comparison", "Membrane", "Other", "Ignore")   # Comparison: D83
 SINGLE_ROLES = ("Nucleus", "Actin", "Membrane")   # at most one channel each
 
 NUCLEAR_DYES = ("dapi", "hoechst", "h3342", "h33342", "draq5", "sytox", "topro", "to-pro")

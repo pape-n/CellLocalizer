@@ -1,10 +1,11 @@
 # CellLocalizer
 
-Desktop program that measures where a protein sits in a cell, in confocal 3D stacks. For every cell it reports which share of the signal lies in the nucleus and in the cytoplasm, how much of it in the actin part of the cytoplasm, and how the signal is enriched near the nuclear envelope, below the cell surface and above the coverslip. Which channel is nucleus, actin, membrane or target is set per data set, so the program is not tied to one protein or cell type.
+Desktop program that measures where a protein sits in a cell, in confocal 3D stacks. For every cell it reports which share of the signal lies in the nucleus and in the cytoplasm, how much of it in the actin part of the cytoplasm, and how the signal is enriched near the nuclear envelope, below the cell surface and above the coverslip. Which channel is nucleus, actin, membrane, target or comparison protein is set per data set, so the program is not tied to one protein or cell type.
 
-- Loads Zeiss CZI (Airyscan-processed or confocal) and ImageJ or OME TIFF with voxel size, channel metadata and z direction
+- Loads Zeiss CZI (Airyscan-processed or confocal), Nikon ND2 and ImageJ or OME TIFF with voxel size, channel metadata and z direction
 - Guides through five steps per cell: channels, cell edge, compartments, check, accept; masks can be adjusted with factors and corrected by hand
-- Computes signal shares, enrichments, distance zones and profiles in 3D, plus polarity, Pearson and Manders coefficients and an optional crosstalk correction
+- Computes signal shares, enrichments, distance zones and profiles in 3D, plus polarity with a confidence flag and a rear to front ratio, the inner and outer half of the nuclear envelope zone, Pearson and Manders coefficients and an optional crosstalk correction
+- Measures each target in the stained area of a comparison channel (for example a second protein)
 - Analyses whole experiment folders, suggests experiment and condition from the names, supports blind review
 - Writes `Results.xlsx` with sheets ready for GraphPad Prism (one column per condition, replicate means), a control image per cell and a complete methods text (English and German, also as Word file)
 - Shows cells as planes, vertical sections or in 3D and exports figures (PNG) and the recorded values (TIFF)

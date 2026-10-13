@@ -22,7 +22,13 @@ SUFFIX = ".lta.json"
 
 
 # settings added after an analysis may have been saved, with the value that reproduces the older result
-LEGACY_PARAMS = {"actin_per_plane": False}          # 1.2.1, D70
+LEGACY_PARAMS = {"actin_per_plane": False,          # 1.2.1, D70
+                 "target_signal": "all",             # 2.1.0, D89: older analyses counted all target signal
+                 "polarity_from": "actin_signal",    # 2.1.0, D88
+                 "polarity_clear_index": 0.25,       # 2.1.0, D84: a new column only
+                 "envelope_lateral_only": False,     # 2.1.0, D86
+                 "comparison": {"sigma_um": 0.15, "method": "li", "factor": 1.0, "manual_threshold": None,
+                                "min_volume_um3": 0.0}}  # 2.1.0, D83: no comparison channel before
 
 def code_number(code: str) -> int:
     """'Image 07' -> 7; no code sorts last."""

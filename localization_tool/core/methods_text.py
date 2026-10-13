@@ -438,8 +438,19 @@ def methods_text(params: AnalysisParams | None = None, summary: Summary | None =
                             + "; the actin compartment is its part outside the nucleus. The "
                             f"brightest part, above {thr(ar, 'actin_rich')} (σ = {n(ar.sigma_um)} µm) and within "
                             "the actin mask, was reported as actin-rich zone."))
-        tmask = (f"For visual control, a target mask was drawn with {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm); "
-                 "it was not formed for channels without staining above noise, and the main values do not depend on it.")
+        if p.target_signal == "mask":
+            tmask = (f"A target mask was formed with {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm), not for channels "
+                     "without staining above noise; all target values count only the signal inside this mask, so "
+                     "diffuse background and the faint halo of bright structures are not included.")
+        else:
+            tmask = (f"For visual control, a target mask was drawn with {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm); "
+                     "it was not formed for channels without staining above noise, and the main values do not depend "
+                     "on it.")
+        comps = [lab for lab, r in s.roles.items() if r == "Comparison"]
+        if comps:
+            cp = p.comparison
+            tmask += (f" The stained area of the comparison channel(s) {_join(comps, lang)} was segmented with "
+                      f"{thr(cp, 'comparison')} (σ = {n(cp.sigma_um)} µm).")
         fac = (f" For {s.own_factors} cell(s) a threshold factor was adjusted after visual inspection; the factors are "
                "listed per cell in the workbook." if s.own_factors else
                " All cells were analysed with the same settings.")
@@ -497,8 +508,18 @@ def methods_text(params: AnalysisParams | None = None, summary: Summary | None =
                             + "; das Aktinkompartiment ist sein Teil außerhalb des Kerns. Der "
                             f"hellste Teil, über {thr(ar, 'actin_rich')} (σ = {n(ar.sigma_um)} µm) und innerhalb "
                             "der Aktinmaske, wurde als aktinreiche Zone ausgegeben."))
-        tmask = (f"Zur Sichtkontrolle wurde eine Target-Maske mit {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm) "
-                 "gebildet, nicht bei Kanälen ohne Färbung über dem Rauschen; die Hauptwerte hängen nicht von ihr ab.")
+        if p.target_signal == "mask":
+            tmask = (f"Eine Target-Maske wurde mit {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm) gebildet, nicht bei "
+                     "Kanälen ohne Färbung über dem Rauschen; alle Targetwerte zählen nur das Signal in dieser Maske, "
+                     "diffuser Hintergrund und der schwache Saum heller Strukturen gehen nicht ein.")
+        else:
+            tmask = (f"Zur Sichtkontrolle wurde eine Target-Maske mit {thr(tg, 'target')} (σ = {n(tg.sigma_um)} µm) "
+                     "gebildet, nicht bei Kanälen ohne Färbung über dem Rauschen; die Hauptwerte hängen nicht von ihr ab.")
+        comps = [lab for lab, r in s.roles.items() if r == "Comparison"]
+        if comps:
+            cp = p.comparison
+            tmask += (f" Die gefärbte Fläche des Vergleichskanals {_join(comps, lang)} wurde mit {thr(cp, 'comparison')} "
+                      f"(σ = {n(cp.sigma_um)} µm) segmentiert.")
         fac = (f" Bei {s.own_factors} Zelle(n) wurde ein Schwellenfaktor nach Sichtprüfung angepasst; die Faktoren "
                "stehen pro Zelle in der Ergebnisdatei." if s.own_factors else
                " Alle Zellen wurden mit denselben Einstellungen ausgewertet.")
@@ -514,19 +535,33 @@ def methods_text(params: AnalysisParams | None = None, summary: Summary | None =
                 f"{ref('carpenter')}, and the enrichment is E = f / φ (1: as dense as the cell average). In addition, "
                 f"zones were measured with exact Euclidean distance maps on the anisotropic voxel grid "
                 f"{ref('ollion')}: nuclear envelope zone (within {env} µm of the nuclear border, about the axial "
-                f"resolution), nucleus interior (more than {env} µm inside), cortex shell ({cor} µm below the cell "
+                "resolution, also split at the border into an inner and an outer half"
+                + (", only where the nucleus surface is tilted more than 45° from the coverslip plane, i.e. without "
+                   "its top and bottom" if p.envelope_lateral_only else "")
+                + f"), nucleus interior (more than {env} µm inside), cortex shell ({cor} µm below the cell "
                 f"surface; the faces of the stack, including a cut top, count as surface) and basal layer ({bas} µm "
                 "above the lowest cell plane, on the coverslip side taken from the image metadata). Zones overlap the "
-                "compartments and each other.")
+                "compartments and each other. The distance of the highest enrichment in the intensity profile "
+                "along the distance to the nuclear border (within 1 µm, parabolic interpolation) was reported as "
+                "peak position (negative inside the nucleus).")
+        if any(r == "Comparison" for r in s.roles.values()):
+            meas += (" For each target, the signal share, volume share and enrichment within the stained area of each "
+                     "comparison channel, and the share of the target mask inside that area, were computed in the "
+                     "same way.")
         if p.sensitivity:
+            what = ("the cell threshold, separately the nucleus threshold and separately the target threshold"
+                    if p.target_signal == "mask" else "the cell threshold, and separately the nucleus threshold")
             meas += (" To show how much each value depends on the exact edges, the signal shares and enrichments of "
-                     "nucleus, cytoplasm and actin were recomputed with the cell threshold, and separately the nucleus "
-                     "threshold, multiplied by 0.8 and 1.2 (the other edges and the actin threshold unchanged) and "
-                     "reported as range; zones were not recomputed.")
+                     f"nucleus, cytoplasm and actin were recomputed with {what}, multiplied by 0.8 and 1.2 (the other "
+                     "edges and the actin threshold unchanged) and reported as range; zones were not recomputed.")
         if p.polarity:
-            meas += (" Polarity: an axis in the coverslip plane from the cell centroid to the actin-weighted centroid "
-                     f"{ref('giese')}; polarity index = axis length / radius of the cell footprint; the plane "
-                     "through the centroid perpendicular to the axis defined the front half.")
+            towards = ("the centroid of the actin-rich mask weighted by the actin intensity"
+                       if p.polarity_from == "actin_rich" else "the actin-weighted centroid of the cell")
+            meas += (" Polarity: an axis in the coverslip plane from the geometric centroid of the cell mask to "
+                     f"{towards} {ref('giese')}; polarity index = axis length / radius of the cell footprint, cells "
+                     f"with an index of at least {n(p.polarity_clear_index)} were classed as clearly polarised; the "
+                     "plane through the centroid perpendicular to the axis defined the front and the rear half, and "
+                     "the rear-to-front ratio is the enrichment of the rear half divided by that of the front half.")
         if p.colocalization:
             meas += (" For comparison with the literature, Pearson's correlation coefficient and Manders' "
                      f"coefficients {ref('manders')} with the automatic threshold of Costes et al. {ref('costes')} "
@@ -540,20 +575,35 @@ def methods_text(params: AnalysisParams | None = None, summary: Summary | None =
                 "geteilt durch die der Zelle (φ), wie bei üblichen objektbasierten Messungen "
                 f"{ref('carpenter')}, und die Anreicherung E = f / φ (1: so dicht wie im Mittel der Zelle). Zusätzlich "
                 f"wurden Zonen mit exakten euklidischen Distanzkarten im anisotropen Voxelraster gemessen "
-                f"{ref('ollion')}: Kernhüllenzone (bis {env} µm um den Kernrand, etwa die axiale Auflösung), "
+                f"{ref('ollion')}: Kernhüllenzone (bis {env} µm um den Kernrand, etwa die axiale Auflösung, zusätzlich "
+                "am Kernrand in eine innere und eine äußere Hälfte geteilt"
+                + (", nur wo die Kernoberfläche um mehr als 45° gegen die Deckglasebene geneigt ist, also ohne Ober- "
+                   "und Unterseite" if p.envelope_lateral_only else "")
+                + "), "
                 f"Kerninneres (mehr als {env} µm innen), Kortexschale ({cor} µm unter der Zelloberfläche; die Flächen "
                 f"des Stapels, auch ein abgeschnittenes oberes Ende, zählen als Oberfläche) und basale Schicht ({bas} µm "
                 "über der untersten Zellebene, auf der Deckglasseite laut Metadaten). Zonen überlappen die "
-                "Kompartimente und einander.")
+                "Kompartimente und einander. Der Abstand der höchsten Anreicherung im Intensitätsprofil entlang des "
+                "Abstands zum Kernrand (innerhalb 1 µm, parabolisch interpoliert) wurde als Lage des Maximums "
+                "angegeben (negativ im Kern).")
+        if any(r == "Comparison" for r in s.roles.values()):
+            meas += (" Für jedes Target wurden Signalanteil, Volumenanteil und Anreicherung in der gefärbten Fläche "
+                     "jedes Vergleichskanals sowie der Anteil der Target-Maske in dieser Fläche ebenso berechnet.")
         if p.sensitivity:
+            what = ("der Zellschwelle, getrennt davon der Kernschwelle und getrennt davon der Targetschwelle"
+                    if p.target_signal == "mask" else "der Zellschwelle und getrennt davon der Kernschwelle")
             meas += (" Um zu zeigen, wie stark jeder Wert von den genauen Rändern abhängt, wurden Signalanteile und "
-                     "Anreicherungen von Kern, Zytoplasma und Aktin mit dem 0,8- und 1,2-Fachen der Zellschwelle und "
-                     "getrennt davon der Kernschwelle erneut berechnet (die übrigen Ränder und die Aktinschwelle "
-                     "unverändert) und als Spanne angegeben; Zonen wurden nicht neu berechnet.")
+                     f"Anreicherungen von Kern, Zytoplasma und Aktin mit dem 0,8- und 1,2-Fachen {what} erneut "
+                     "berechnet (die übrigen Ränder und die Aktinschwelle unverändert) und als Spanne angegeben; "
+                     "Zonen wurden nicht neu berechnet.")
         if p.polarity:
-            meas += (" Polarität: eine Achse in der Deckglasebene vom Zellschwerpunkt zum aktingewichteten "
-                     f"Schwerpunkt {ref('giese')}; Polaritätsindex = Achsenlänge / Radius der Zellgrundfläche; die "
-                     "Ebene durch den Schwerpunkt senkrecht zur Achse definiert die Fronthälfte.")
+            towards = ("zum mit der Aktinintensität gewichteten Schwerpunkt der aktinreichen Maske"
+                       if p.polarity_from == "actin_rich" else "zum aktingewichteten Schwerpunkt der Zelle")
+            meas += (" Polarität: eine Achse in der Deckglasebene vom geometrischen Schwerpunkt der Zellmaske "
+                     f"{towards} {ref('giese')}; Polaritätsindex = Achsenlänge / Radius der Zellgrundfläche, Zellen "
+                     f"mit einem Index ab {n(p.polarity_clear_index)} galten als eindeutig polarisiert; die Ebene durch "
+                     "den Schwerpunkt senkrecht zur Achse definiert Front- und Rückhälfte, das Verhältnis hinten zu "
+                     "vorne ist die Anreicherung der Rückhälfte geteilt durch die der Fronthälfte.")
         if p.colocalization:
             meas += (" Zum Vergleich mit der Literatur wurden der Korrelationskoeffizient nach Pearson und die "
                      f"Manders-Koeffizienten {ref('manders')} mit der automatischen Schwelle nach Costes et al. "

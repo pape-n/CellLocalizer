@@ -20,7 +20,11 @@ from localization_tool.core.params import (
 from localization_tool.gui.widgets import button, label
 
 MASK_NAMES = {"cell": "Cell edge", "nucleus": "Nucleus", "actin": "Actin", "actin_rich": "Actin-rich",
-              "target": "Target mask"}
+              "target": "Target mask", "comparison": "Comparison mask"}
+TARGET_SIGNAL_NAMES = {"mask": "Only inside the target mask (correcting the mask changes the numbers)",
+                       "all": "All target signal in the cell (the mask is only for checking)"}
+POLARITY_NAMES = {"actin_rich": "Actin-rich mask (follows its factor and painted masks)",
+                  "actin_signal": "Whole actin signal (as before 2.1)"}
 METHOD_NAMES = {"otsu": "Otsu", "li": "Li", "triangle": "Triangle", "manual": "Manual value"}
 NUCLEUS_METHOD_NAMES = {"halfmax": "Half maximum", **METHOD_NAMES}
 Z_NAMES = {"auto": "From the file (recommended)", "first_plane": "First plane", "last_plane": "Last plane"}
@@ -171,6 +175,11 @@ class SettingsDialog(QDialog):
                                      "half-maximum threshold of its own plane (between cytoplasm and actin of "
                                      "that plane). Off: one threshold for the whole stack, as before 1.2.1.")
         form.addRow("", self.actin_planes)
+        self.target_signal = _combo(TARGET_SIGNAL_NAMES, p.target_signal)
+        self.target_signal.setToolTip("D89: inside the mask, diffuse background and the faint halo of bright spots "
+                                      "do not count, and the values follow the target mask factor. All signal: "
+                                      "independent of a threshold, faint even staining counts as well.")
+        form.addRow("Target signal counted", self.target_signal)
         lay.addLayout(form)
         lay.addStretch(1)
         return w
@@ -202,7 +211,12 @@ class SettingsDialog(QDialog):
                             "Results.xlsx as column bottom_plane_ratio, not as a note.")
         self.sat = _spin(0.0, 0.1, 0.0005, 4, p.saturation_fraction, "",
                          "Note 'saturated' when more than this share of the cell voxels is at the maximum")
+        self.lateral = QCheckBox("Nuclear envelope zones only at the side of the nucleus")
+        self.lateral.setChecked(p.envelope_lateral_only)
+        self.lateral.setToolTip("Leaves out the top and bottom of the nucleus, where the axial blur (about three "
+                                "times the lateral) carries light across the nucleus edge (D86)")
         form.addRow("Nuclear envelope zone ±", self.envelope)
+        form.addRow("", self.lateral)
         form.addRow("Cortex shell", self.cortex)
         form.addRow("Basal layer", self.basal)
         form.addRow("Profile bins", self.bin)
@@ -220,11 +234,17 @@ class SettingsDialog(QDialog):
         self.pol_on.setChecked(p.polarity)
         self.col_on = QCheckBox("Colocalization: Pearson and Manders (Costes threshold) with actin and other targets")
         self.col_on.setChecked(p.colocalization)
-        self.sens_on = QCheckBox("Sensitivity span: shares again with cell and nucleus edge at 0.8 and 1.2 x threshold")
+        self.sens_on = QCheckBox("Sensitivity span: shares again with cell, nucleus and target edge at 0.8 and 1.2 x threshold")
         self.sens_on.setChecked(p.sensitivity)
         self.sens_on.setToolTip("Shows for every cell how much its values depend on the exact edges. Takes a few "
                                 "seconds more per cell.")
         lay.addWidget(self.pol_on)
+        self.pol_from = _combo(POLARITY_NAMES, p.polarity_from)
+        lay.addLayout(_form_row("Front direction towards", self.pol_from))
+        self.pol_clear = _spin(0.0, 2.0, 0.01, 2, p.polarity_clear_index, "",
+                               "Cells with a polarity index from this value on count as polar (column "
+                               "polarity_clear, bold arrow). Below it the arrow is short and thin.")
+        lay.addLayout(_form_row("Clear front from polarity index", self.pol_clear))
         lay.addWidget(self.col_on)
         lay.addWidget(self.sens_on)
         lay.addWidget(label("Review", "title"))
@@ -321,7 +341,7 @@ class SettingsDialog(QDialog):
         from localization_tool.core.offsets import estimate_offsets
         from localization_tool.core.reader import read_image
 
-        path, _ = QFileDialog.getOpenFileName(self, "Bead image", "", "Images (*.czi *.tif *.tiff)")
+        path, _ = QFileDialog.getOpenFileName(self, "Bead image", "", "Images (*.czi *.nd2 *.tif *.tiff)")
         if not path:
             return
         self.off_info.setText("Measuring ...")
@@ -492,6 +512,8 @@ class SettingsDialog(QDialog):
             "saturation_fraction": self.sat.value(),
             "polarity": self.pol_on.isChecked(), "colocalization": self.col_on.isChecked(),
             "sensitivity": self.sens_on.isChecked(), "actin_per_plane": self.actin_planes.isChecked(),
+            "target_signal": self.target_signal.currentData(), "polarity_from": self.pol_from.currentData(),
+            "polarity_clear_index": self.pol_clear.value(), "envelope_lateral_only": self.lateral.isChecked(),
         })
         offs = []
         for r in range(self.off.rowCount()):

@@ -1,14 +1,14 @@
-# CellLocalizer 2.0.1
+# CellLocalizer 2.1.0
 
-13 October 2026. The first public release (2.0.0 as Localization Tool, renamed in 2.0.1). Open source under the BSD 3-Clause License. Analyses saved with earlier versions open and keep their settings; the program offers to recompute their cells so that new columns appear, and cells whose outlines stay the same keep "accepted".
+13 October 2026. Changes after the first use in the lab. CellLocalizer 2.0.1 was the first public release (2.0.0 as Localization Tool). Open source under the BSD 3-Clause License. Analyses saved with earlier versions open and keep their settings; the program offers to recompute their cells so that new columns appear, and cells whose outlines stay the same keep "accepted".
 
 ## What it does
 
-The program measures in confocal 3D stacks (Zeiss CZI, also ImageJ and OME TIFF) where a protein sits in a cell: the share of its signal in the nucleus and the cytoplasm, in the actin part of the cytoplasm, in zones (nuclear envelope, below the cell surface, above the coverslip, front half) and as enrichment (1 = as dense as on average in the cell). The result is a folder with `Results.xlsx` (sheets ready for GraphPad Prism), a control image for every cell and the analysis file to open again.
+The program measures in confocal 3D stacks (Zeiss CZI, Nikon ND2, also ImageJ and OME TIFF) where a protein sits in a cell: the share of its signal in the nucleus and the cytoplasm, in the actin part of the cytoplasm, in zones (nuclear envelope, below the cell surface, above the coverslip, front half) and as enrichment (1 = as dense as on average in the cell). The result is a folder with `Results.xlsx` (sheets ready for GraphPad Prism), a control image for every cell and the analysis file to open again.
 
 ## Installation
 
-Windows: `CellLocalizer-2.0.1-Windows-Setup.exe`, no administrator rights needed, or the portable zip. macOS (Apple Silicon): the DMG. The programs are not signed: see `INSTALL.md` for the first start.
+Windows: `CellLocalizer-2.1.0-Windows-Setup.exe`, no administrator rights needed, or the portable zip. macOS (Apple Silicon): the DMG. The programs are not signed: see `INSTALL.md` for the first start.
 
 ## Getting started
 
@@ -35,6 +35,15 @@ The guide is under Help and on the start page, in English and German. Help > "Me
 - An image is analysed as a whole; the largest connected structure is the cell. Several cells per image are analysed one after another with "Next cell in this image" and exclusion polygons.
 - Very large images (tile scans above about 500 MB) need much memory; the program warns before a series.
 - The programs are not signed; Windows and macOS warn on the first start.
+
+## New in 2.1.0
+
+- **Nikon ND2 files:** z-stacks from NIS-Elements open directly, with voxel size, channel names, wavelengths and colours. The coverslip side comes from the z direction and the stand (inverted Ti/Ti2, upright Ni); otherwise the setting "Coverslip side" decides. Time series and multi-position files are skipped with a reason. This reader is new: please report a file that does not open or shows wrong sizes (Help > Report a problem).
+- **Comparison channel:** a new channel role "Comparison" for a second stained protein (for example Vimentin). It is measured like a target and gets its own mask (colour, factor in step 4, shown in 3D and in the cell viewer). Every target is also measured in the stained area of the comparison channel: share of the signal there, enrichment, and the share of the target mask inside the area. Results.xlsx has a Prism sheet "<target> Enr in <name>".
+- **Target values from the target mask:** the shares now count only the target signal inside the target mask, so correcting the mask with its factor changes the numbers, and diffuse background and the faint halo of bright structures no longer count. The sensitivity span also moves the target edge. Settings > Masks > "Target signal counted" switches back to all signal. Saved analyses keep how they were computed: with the older settings 2.1.0 gives the same values as 2.0.1. A target without staining above noise (secondary antibody control) gets no mask, its values stay empty.
+- **Polarity:** the front direction points to the actin-rich mask (its factor and painted masks move it). The arrow is long and bold for a clear front and short and thin for a nearly even cell. New column polarity_clear (1 from the polarity index set in Settings > Extras on, provisional default 0.25: set it from resting cells). New: enrichment of the rear half and the ratio rear / front (density, 1 = even).
+- **Nuclear envelope:** the envelope zone is also split into an inner half (inside the nucleus mask) and an outer half. "Highest enrichment at ... µm from the nucleus edge" says on which side the signal peaks, averaged over the whole nucleus; empty when the profile has no maximum near the edge. Optional: envelope zones only at the side of the nucleus, without top and bottom where the axial blur is largest (Settings > Zones).
+- **Stability:** every display setting stays as you left it when you move between the steps (the cytoplasm mask no longer comes back after the results in 3D); the cell viewer frees its memory and its 3D view when closed and computes 3D surfaces in the background, so the window no longer freezes; 3D surfaces of a previous cell no longer appear; the program waits for a running calculation before it closes; a crash on Windows is now kept in crash_previous.log.
 
 ## New in 2.0.1
 

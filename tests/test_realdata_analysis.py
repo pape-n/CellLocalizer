@@ -43,6 +43,9 @@ def test_analysis_on_real_files():
         assert not (m["actin"] & ~m["cell"]).any()
         for label, v in r.target_values.items():
             total = v["signal_nucleus_pct"] + v["signal_cytoplasm_pct"]
+            if total != total:                   # D89: no staining above noise, no mask, no values
+                assert not m[f"target_{label}"].any() and any("no staining" in n for n in r.notes), (f.name, label)
+                continue
             assert total == pytest.approx(100.0, abs=1e-6), (f.name, label)
         done += 1
     assert done >= 3

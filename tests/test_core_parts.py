@@ -4,12 +4,24 @@ import numpy as np
 import pytest
 
 from localization_tool.core import distances, qc, segmentation
-from localization_tool.core.analysis import analyze_cell
 from localization_tool.core.channels import ChannelAssignment
 from localization_tool.core.crop import CropBox, crop
 from localization_tool.core.params import AnalysisParams, MaskParams
 from localization_tool.core.reader import z_orientation
 from localization_tool.core.synthetic import make_golden_cell
+
+from localization_tool.core import analysis as _analysis
+from localization_tool.core.params import AnalysisParams as _Params
+
+
+def analyze_cell(stack, assignments, params=None, **kw):
+    """These tests check analytic values of the whole target signal (D30). Since D89 that is the
+    setting target_signal "all"; counting inside the target mask is tested in test_v21.py."""
+    p = params or _Params()
+    if p.target_signal != "all":
+        p = p.with_overrides({"target_signal": "all"})
+    return _analysis.analyze_cell(stack, assignments, p, **kw)
+
 
 VOX = (0.13, 0.05, 0.05)
 ASSIGN = [ChannelAssignment("Target", "T", "#FF2BD6"), ChannelAssignment("Actin", "Actin", "#2BD46B"),

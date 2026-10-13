@@ -144,9 +144,11 @@ def test_guided_workflow_on_example(window, tmp_path):
 
     # show only the nucleus
     p.only_menu.setCurrentIndex(1)
+    p.only_menu.activated.emit(1)
     cmap = lab.colormap.color_dict
     assert cmap[2][3] == 0 and cmap[1][3] > 0
     p.only_menu.setCurrentIndex(5)
+    p.only_menu.activated.emit(5)
     assert w._target_layers["TTN"].visible
     p.only_menu.setCurrentIndex(0)
 
@@ -172,7 +174,7 @@ def test_guided_workflow_on_example(window, tmp_path):
     wb = load_workbook(out / "Results.xlsx")
     assert wb.sheetnames[0] == "Read me" and "TTN Enr nucleus" in wb.sheetnames
     summary = list(wb["Summary"].values)
-    assert len(summary) == 4 and summary[2][5] == "accepted"      # two header rows
+    assert len(summary) == 4 and summary[2][6] == "accepted"      # two header rows, role in column 6
 
     # open the analysis again: the cell is listed without recalculation, and can be edited
     w.new_analysis()
@@ -479,6 +481,7 @@ def test_cell_viewer_pictures_values_batch_and_3d(window, tmp_path, monkeypatch)
     v.show()
     assert v.cell_list.count() == 1
     v.cell_list.setCurrentRow(0)
+    v.wait_idle()
     _pump(0.5)
     assert v.cell is not None and v.preview.pixmap() is not None and not v.preview.pixmap().isNull()
     out = tmp_path / "out"
@@ -501,7 +504,9 @@ def test_cell_viewer_pictures_values_batch_and_3d(window, tmp_path, monkeypatch)
     assert (out / "exported_cells.csv").exists()
     # 3D: volumes and the cell surface, saved as shown
     v.set_mode("3d")
-    _pump(1.0)
+    _pump(0.3)
+    v.wait_idle()
+    _pump(0.5)
     assert v._model3d is not None and len(v._model3d.layers) >= 4
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out / "3d.png"), "")))
     v.export_png()
@@ -541,6 +546,7 @@ def test_cell_viewer_mask_panel_order_and_colours(window, tmp_path):
     v = cellviewer.CellViewer(make_analysis(tmp_path / "analysis"))
     v.show()
     v.cell_list.setCurrentRow(0)
+    v.wait_idle()
     _pump(0.5)
     names = [m.name for m in v.settings.masks]
     assert names[0].startswith("target_")

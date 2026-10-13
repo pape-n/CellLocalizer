@@ -17,7 +17,8 @@ from .project_file import AnalysisFile, CellSpec, ImageSpec, load, save
 from .reader import ReaderError, read_image
 
 ROLE_COLORS = {"Nucleus": DISPLAY_COLORS["Blue"], "Actin": DISPLAY_COLORS["Green"],
-               "Target": DISPLAY_COLORS["Magenta"], "Membrane": DISPLAY_COLORS["Gray"],
+               "Target": DISPLAY_COLORS["Magenta"], "Comparison": DISPLAY_COLORS["Yellow"],
+               "Membrane": DISPLAY_COLORS["Gray"],
                "Other": DISPLAY_COLORS["Orange"], "Ignore": DISPLAY_COLORS["Gray"]}
 
 
@@ -32,7 +33,8 @@ def parse_roles(text: str) -> list[tuple[str, str, str]]:
         role = role.strip().capitalize()
         if role not in ROLES:
             raise ValueError(f"unknown role {role!r}, allowed: {', '.join(ROLES)}")
-        out.append((key.strip().lower(), role, label.strip() or (role if role != "Target" else key.strip())))
+        out.append((key.strip().lower(), role,
+                    label.strip() or (role if role not in ("Target", "Comparison") else key.strip())))
     return out
 
 
@@ -46,7 +48,7 @@ def assign_by_rules(channels, rules) -> list[ChannelAssignment] | None:
         if hit is None:
             return None
         role, label = hit
-        color = next(target_colors, DISPLAY_COLORS["Gray"]) if role == "Target" else ROLE_COLORS[role]
+        color = next(target_colors, DISPLAY_COLORS["Gray"]) if role in ("Target", "Comparison") else ROLE_COLORS[role]
         result.append(ChannelAssignment(role=role, label=label, color=color))
     return result
 

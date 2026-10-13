@@ -252,12 +252,16 @@ def _arrow(rgb: np.ndarray, pol: dict | None, oy: int, ox: int) -> np.ndarray:
     d = ImageDraw.Draw(img)
     (y0, x0), (y1, x1) = pol["start"], pol["end"]
     a, b = (x0 - ox, y0 - oy), (x1 - ox, y1 - oy)
-    d.line([a, b], fill=(255, 140, 0), width=3)
+    clear = pol.get("clear", True)            # D84: a thin, dimmer arrow when the polarity is not clear
+    col = (255, 140, 0) if clear else (150, 90, 20)
+    width = 3 if clear else 1
+    head = 12 if clear else 7
+    d.line([a, b], fill=col, width=width)
     v = np.array([b[0] - a[0], b[1] - a[1]], float)
     n = float(np.hypot(*v))
     if n > 0:
         v /= n
         w = np.array([-v[1], v[0]])
         tip = np.array(b, float)
-        d.polygon([tuple(tip), tuple(tip - 12 * v + 7 * w), tuple(tip - 12 * v - 7 * w)], fill=(255, 140, 0))
+        d.polygon([tuple(tip), tuple(tip - head * v + head * 0.6 * w), tuple(tip - head * v - head * 0.6 * w)], fill=col)
     return np.asarray(img, np.float32)

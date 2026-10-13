@@ -53,6 +53,9 @@ def test_init_and_analyze_end_to_end(tmp_path):
     assert main(["init", str(img.parent), "--out", str(lta), "--roles", "647=Target:TTN,488=Actin,DAPI=Nucleus"]) == 0
     af = project_file.load(lta)
     assert len(af.images) == 1 and af.images[0].assignments[0].label == "TTN"
+    assert af.params.target_signal == "mask"                    # new analyses count inside the mask (D89)
+    af.params.target_signal = "all"                             # the analytic truth is for all target signal
+    project_file.save(af, lta)
     out = tmp_path / "results"
     assert main(["analyze", str(lta), "--out", str(out), "--csv"]) == 0
     rows = list(csv.DictReader((out / "cells.csv").open(encoding="utf-8-sig")))

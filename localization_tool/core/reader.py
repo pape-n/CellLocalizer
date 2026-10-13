@@ -1,4 +1,4 @@
-"""Reading of Zeiss CZI and TIFF files into an ImageStack."""
+"""Reading of Zeiss CZI, Nikon ND2 and TIFF files into an ImageStack."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 
 from .image import ChannelInfo, ImageStack
 
-SUPPORTED_SUFFIXES = (".czi", ".tif", ".tiff")
+SUPPORTED_SUFFIXES = (".czi", ".nd2", ".tif", ".tiff")
 DATA_AXES = "CZYX"
 
 
@@ -21,7 +21,7 @@ def read_image(path: str | Path) -> ImageStack:
     if not path.exists():
         raise ReaderError(f"File not found: {path}")
     suffix = path.suffix.lower()
-    readers = {".czi": _read_czi, ".tif": _read_tiff, ".tiff": _read_tiff}
+    readers = {".czi": _read_czi, ".nd2": _read_nd2, ".tif": _read_tiff, ".tiff": _read_tiff}
     if suffix in readers:
         try:
             return readers[suffix](path)
@@ -34,7 +34,7 @@ def read_image(path: str | Path) -> ImageStack:
                               "The file may be damaged or incomplete.") from exc
     raise ReaderError(
         f"{path.name}: file type '{path.suffix}' is not supported. "
-        "Supported are Zeiss .czi and .tif/.tiff (ImageJ or OME)."
+        "Supported are Zeiss .czi, Nikon .nd2 and .tif/.tiff (ImageJ or OME)."
     )
 
 
@@ -259,6 +259,114 @@ def acquisition_settings(xml: str) -> dict:
     if channels:
         out["channels"] = channels
     return out
+
+
+# --------------------------------------------------------------------------- ND2 (D90)
+
+ND2_AXES = {"T": "T", "P": "M", "Z": "Z", "C": "C", "Y": "Y", "X": "X", "S": "S"}
+INVERTED_STANDS = ("ti2", "ti-e", "ti-u", "ti-s", "eclipse ti", "te2000", "te300", "diaphot")
+UPRIGHT_STANDS = ("ni-e", "ni-u", "eclipse ni", "fn1", "fn-s", "80i", "90i", "e600", "e800", "e1000")
+
+
+def _nd2_color(value) -> str | None:
+    """nd2 >= 0.11 gives a Color (r, g, b); older versions and the file store 0x00BBGGRR."""
+    if all(hasattr(value, k) for k in ("r", "g", "b")):
+        return _hex_rgb(f"#{int(value.r) & 0xFF:02X}{int(value.g) & 0xFF:02X}{int(value.b) & 0xFF:02X}")
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return _hex_rgb(f"#{v & 0xFF:02X}{(v >> 8) & 0xFF:02X}{(v >> 16) & 0xFF:02X}")
+
+
+def nd2_z_orientation(experiment, text: str) -> dict:
+    """Which plane lies at the coverslip, from the ND2 metadata (D90, like D20 for CZI).
+
+    The z loop says whether planes were taken from bottom to top. On an inverted stand (Ti2, Ti,
+    TE2000) the bottom is the coverslip side, on an upright stand (Ni, FN1) the top faces the
+    objective and the coverslip. Without a recognised stand nothing is returned and the setting
+    "Coverslip side" decides (default: first plane)."""
+    loop = next((e for e in (experiment or []) if getattr(e, "type", "") == "ZStackLoop"), None)
+    params = getattr(loop, "parameters", None)
+    bottom_to_top = getattr(params, "bottomToTop", None)
+    if bottom_to_top is None:
+        return {}
+    low = (text or "").lower()
+    if any(s in low for s in INVERTED_STANDS):
+        stand, first = "inverted", bool(bottom_to_top)
+    elif any(s in low for s in UPRIGHT_STANDS):
+        stand, first = "upright", not bool(bottom_to_top)
+    else:
+        return {}
+    order = "bottom to top" if bottom_to_top else "top to bottom"
+    return {"coverslip_first": first, "z_orientation_source": f"ND2 metadata: z stack {order}, {stand} stand"}
+
+
+def _read_nd2(path: Path) -> ImageStack:
+    import nd2
+
+    try:
+        f = nd2.ND2File(path)
+    except Exception as exc:
+        raise ReaderError(f"{path.name} could not be opened as ND2 file ({exc}). The file may be incomplete.") from exc
+    with f:
+        if f.is_rgb:
+            raise ReaderError(f"{path.name} is an RGB colour image, which is not supported.")
+        sizes = dict(f.sizes)
+        axes = "".join(ND2_AXES.get(k, k) for k in sizes)
+        try:
+            raw = np.asarray(f.asarray())
+        except Exception as exc:
+            raise ReaderError(f"{path.name}: image data could not be read ({exc}). The file may be incomplete.") from exc
+        data = _to_czyx(raw, axes, path.name)
+        try:
+            vs = f.voxel_size()
+            dx, dy, dz = _num(vs.x), _num(vs.y), _num(vs.z)
+        except Exception:
+            dx = dy = dz = None
+        calibrated = bool(dx and dy and (dz or data.shape[1] == 1))
+        if "Z" not in sizes:
+            dz = None
+        dx = dx or 1.0
+        dy = dy or dx
+        dz = dz or (dx if data.shape[1] == 1 else 1.0)
+        meta_channels = list(getattr(getattr(f, "metadata", None), "channels", None) or [])
+        channels = []
+        for i in range(data.shape[0]):
+            ch = getattr(meta_channels[i], "channel", None) if i < len(meta_channels) else None
+            if ch is None:
+                channels.append(ChannelInfo(index=i, name=f"C{i + 1}"))
+                continue
+            name = str(getattr(ch, "name", "") or f"C{i + 1}")
+            channels.append(ChannelInfo(index=i, name=name, fluor=None,
+                                        excitation_nm=_num(getattr(ch, "excitationLambdaNm", None)),
+                                        emission_nm=_num(getattr(ch, "emissionLambdaNm", None)),
+                                        color=_nd2_color(getattr(ch, "color", None) or getattr(ch, "colorRGB", None))))
+        info: dict = {"format": "ND2"}
+        scope = getattr(meta_channels[0], "microscope", None) if meta_channels else None
+        acq: dict = {}
+        if scope is not None and getattr(scope, "objectiveName", None):
+            info["objective"] = str(scope.objectiveName)
+            acq["objective"] = str(scope.objectiveName)
+        if scope is not None and _num(getattr(scope, "immersionRefractiveIndex", None)):
+            acq["refractive_index"] = float(scope.immersionRefractiveIndex)
+        if acq:
+            acq["channels"] = [{} for _ in channels]
+            info["acquisition"] = acq
+        try:
+            text = " ".join(str(v) for v in (f.text_info or {}).values())
+        except Exception:
+            text = ""
+        try:
+            experiment = f.experiment
+        except Exception:
+            experiment = []
+        info.update(nd2_z_orientation(experiment, text))
+        date = (f.text_info or {}).get("date") if isinstance(getattr(f, "text_info", None), dict) else None
+        if date:
+            info["acquired"] = str(date)
+    return ImageStack(data=data, voxel_um=(dz, dy, dx), channels=channels, source=path,
+                      calibrated=calibrated, info=info)
 
 
 ACQUISITION_KEYS = ("airyscan_strength", "laser_transmission_pct", "detector_voltage", "detector_offset")

@@ -46,24 +46,52 @@ KEY_MEASURES = [
     ("enrichment_actin_rich", "Enr actin-rich", "Enrichment in the actin-rich zone (front)"),
     ("enrichment_basal_layer", "Enr basal", "Enrichment in the basal layer above the coverslip"),
     ("enrichment_front", "Enr front", "Enrichment in the front half of the cell (axis from the actin channel)"),
+    ("rear_to_front_ratio", "Rear to front", "Density rear half / front half (1 = even, above 1 more in the rear)"),
+    ("enrichment_envelope_inner", "Enr env inner", "Enrichment in the inner half of the nuclear envelope zone"),
+    ("enrichment_envelope_outer", "Enr env outer", "Enrichment in the outer half of the nuclear envelope zone"),
 ]
+
+
+def key_measures(rows: list[dict]) -> list[tuple[str, str, str]]:
+    """The key measures plus one per comparison area found in the rows (D83)."""
+    extra = sorted({k for r in rows for k in r if k.startswith("enrichment_in_")})
+    return KEY_MEASURES + [(k, f"Enr in {k[len('enrichment_in_'):]}",
+                            f"Enrichment in the {k[len('enrichment_in_'):]} area (1 = as dense as the cell average)")
+                           for k in extra]
+
+
+def summary_groups(rows: list[dict]) -> list:
+    """The summary columns plus a group per comparison area (D83)."""
+    names = sorted({k[len("signal_in_"):-len("_pct")] for r in rows for k in r
+                    if k.startswith("signal_in_") and k.endswith("_pct")})
+    extra = [(f"In {n} area", [(f"signal_in_{n}_pct", "Signal %", PCT), (f"volume_{n}_area_pct", "Volume %", PCT),
+                               (f"enrichment_in_{n}", "Enrichment", ENR),
+                               (f"target_mask_in_{n}_pct", "Mask in area %", PCT)]) for n in names]
+    k = next(i for i, (title, _) in enumerate(SUMMARY_GROUPS) if title == "Target mask")
+    return SUMMARY_GROUPS[:k] + extra + SUMMARY_GROUPS[k:]
 
 # Summary: groups of (key, header, number format)
 _SVE = lambda k: [(f"signal_{k}_pct", "Signal %", PCT), (f"volume_{k}_pct", "Volume %", PCT),  # noqa: E731
                   (f"enrichment_{k}", "Enrichment", ENR)]
 SUMMARY_GROUPS = [
     ("Cell", [("experiment", "Experiment", None), ("condition", "Condition", None), ("image", "Image", None),
-              ("cell", "Cell", None), ("target", "Target", None), ("status", "Status", None)]),
+              ("cell", "Cell", None), ("target", "Target", None), ("role", "Role", None),
+              ("status", "Status", None)]),
     ("Nucleus", _SVE("nucleus")),
     ("Cytoplasm", _SVE("cytoplasm")),
     ("Actin (part of cytoplasm)", _SVE("actin")),
     ("Actin-rich zone", _SVE("actin_rich")),
     ("Nucleus interior", _SVE("nucleus_interior")),
     ("Nuclear envelope zone", _SVE("envelope_zone")),
+    ("Envelope zone, inner half", _SVE("envelope_inner")),
+    ("Envelope zone, outer half", _SVE("envelope_outer")),
+    ("Peak at the nucleus edge", [("envelope_peak_um", "Distance µm", R2),
+                                  ("envelope_peak_enrichment", "Enrichment", ENR)]),
     ("Cortex shell", _SVE("cortex_shell")),
     ("Basal layer", _SVE("basal_layer")),
     ("Front half", [("signal_front_pct", "Signal %", PCT), ("volume_front_pct", "Volume %", PCT),
                     ("enrichment_front", "Enrichment", ENR)]),
+    ("Rear half", [("enrichment_rear", "Enrichment", ENR), ("rear_to_front_ratio", "Rear / front", ENR)]),
     ("Target mask", [("target_mask_signal_pct", "Signal %", PCT), ("target_mask_volume_pct", "Volume %", PCT)]),
     ("With actin", [("pcc_actin", "PCC", R2), ("m1_actin", "M1", R2), ("m2_actin", "M2", R2)]),
     ("Sensitivity (edges x0.8 / x1.2)", [("enrichment_nucleus_min", "E nucleus min", ENR),
@@ -71,7 +99,8 @@ SUMMARY_GROUPS = [
                                          ("signal_nucleus_pct_min", "Sig nucleus min", PCT),
                                          ("signal_nucleus_pct_max", "Sig nucleus max", PCT)]),
     ("Cell size and shape", [("cell_volume_um3", "Cell µm³", VOL), ("nucleus_volume_um3", "Nucleus µm³", VOL),
-                             ("cell_height_um", "Height µm", PCT), ("polarity_index", "Polarity index", R2)]),
+                             ("cell_height_um", "Height µm", PCT), ("polarity_index", "Polarity index", R2),
+                             ("polarity_clear", "Clear front (1 = yes)", VOL)]),
     ("", [("notes", "Notes", None)]),
 ]
 
@@ -117,17 +146,31 @@ _READ_ME = [
                                   f"envelope zone (within {e:g} µm of it), cortex shell ({c:g} µm below the cell "
                                   f"surface), basal layer ({b:g} µm above the coverslip). Zones overlap, they are "
                                   "extra views."),
-    ("Front half", "Axis in the coverslip plane from the cell centre to the actin-weighted centre. Polarity "
-                   "index = axis length / radius of the cell footprint: about 0 for an even cortex, larger with "
-                   "a front. For cells with a low index the front values mean little."),
-    ("Target mask", "Voxels with clear target signal. A visual check and an extra view; the shares above use "
-                    "all of the target signal and do not depend on this mask."),
+    ("Front half", "Axis in the coverslip plane from the centre of the cell mask to the actin-weighted centre of "
+                   "the actin-rich mask (or of all actin, see Info). Polarity index = axis length / radius of the "
+                   "cell footprint: about 0 for an even cortex, larger with a front. Column polarity_clear = 1 from "
+                   "the threshold in the settings on; for cells with 0 the front values mean little."),
+    ("Rear half", "Enrichment of the other half. Rear / front = density in the rear half divided by the density "
+                  "in the front half: 1 = even, above 1 more in the rear. The axis comes from actin, so for actin "
+                  "itself the ratio is circular."),
+    ("Envelope zone halves", "The nuclear envelope zone split at the nucleus edge: inner half inside the nucleus "
+                             "mask, outer half outside. Peak at the nucleus edge: distance of the highest enrichment "
+                             "in the profile within 1 µm of the edge (negative = inside), averaged over the whole "
+                             "nucleus surface. A single spot closer to the edge than the resolution (about 0.15 µm "
+                             "laterally, 0.4 µm axially) cannot be placed inside or outside."),
+    ("In <name> area", "A comparison channel (e.g. Vimentin): its stained area. Signal % = share of the target "
+                       "signal inside that area, Volume % = share of the cell the area takes, Enrichment = both "
+                       "divided. Mask in area % = share of the target mask inside the area."),
+    ("Target mask", "Voxels with clear target signal. Info, parameter target_signal, says how the shares were "
+                    "counted: 'mask' (default since 2.1) counts only the signal inside this mask, so correcting it "
+                    "changes the numbers; 'all' counts all target signal and the mask is only a check."),
     ("PCC, M1, M2", "Colocalization with actin inside the cell, for comparison with the literature. PCC: "
                     "Pearson correlation (-1 to 1). M1: share of the target signal where actin is above its "
                     "Costes threshold, M2 the other way round. Empty when the channels are not positively "
                     "correlated."),
-    ("Sensitivity", "The main values computed again with the cell edge and the nucleus edge at 0.8 and 1.2 "
-                    "times their threshold (four variants). Min and max include the value itself. A wide span "
+    ("Sensitivity", "The main values computed again with the cell edge and the nucleus edge (and, when the shares "
+                    "count inside the target mask, the target edge) at 0.8 and 1.2 times their threshold. Min and "
+                    "max include the value itself. A wide span "
                     "means the value depends on where exactly the edge lies: look at that cell again."),
     ("Acquisition", "Airyscan strength, laser transmission and detector gain per image and channel, read from "
                     "the CZI file. Within one experiment they should be the same; a note says when they differ. "
@@ -143,7 +186,8 @@ _READ_ME = [
     ("Status", "accepted: you checked the cell. to check: computed without your check (e.g. 'Analyze all "
                "images'); these cells are in Summary and All values, not in the Prism sheets and Replicates."),
     ("Empty cells", "No value: e.g. no nucleus or actin channel, no nucleus found, no Costes threshold, or "
-                    "no target mask because the target channel shows no staining above noise. "
+                    "no target mask because the target channel shows no staining above noise (with the shares "
+                    "counted inside the mask, all target values of such a cell are then empty). "
                     "The column Notes says why."),
 ]
 
@@ -240,18 +284,19 @@ def acquisition_notes(rows: list[dict], tolerance: float = 0.01) -> list[dict]:
 
 
 def _summary(ws, rows: list[dict]) -> None:
+    groups = summary_groups(rows)
     col = 1
-    for title, cols in SUMMARY_GROUPS:
+    for title, cols in groups:
         if len(cols) > 1:
             ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + len(cols) - 1)
         _header_cell(ws, 1, col, title)
         for k, (_, head, _) in enumerate(cols):
             _header_cell(ws, 2, col + k, head, strong=False)
         col += len(cols)
-    flat = [c for _, cols in SUMMARY_GROUPS for c in cols]
+    flat = [c for _, cols in groups for c in cols]
     group_start = set()
     col = 1
-    for _, cols in SUMMARY_GROUPS:
+    for _, cols in groups:
         group_start.add(col)
         col += len(cols)
     band, last = False, None
@@ -268,10 +313,10 @@ def _summary(ws, rows: list[dict]) -> None:
                 cell.fill = PatternFill("solid", fgColor=BAND)
             if c in group_start:
                 cell.border = Border(left=THIN)
-    ws.freeze_panes = "G3"
+    ws.freeze_panes = "H3"
     ws.row_dimensions[2].height = 30
     _widths(ws, {c: 10 for c in range(1, len(flat) + 1)})
-    _widths(ws, {1: 12, 2: 16, 3: 36, 4: 8, 5: 8, 6: 11, len(flat): 60})
+    _widths(ws, {1: 12, 2: 16, 3: 36, 4: 8, 5: 8, 6: 11, 7: 11, len(flat): 60})
 
 
 def write_results(path: str | Path, rows: list[dict], profile_rows: list[dict], info: dict,
@@ -308,11 +353,12 @@ def write_results(path: str | Path, rows: list[dict], profile_rows: list[dict], 
     prism_rows, checked_only = _checked(rows)
     which = ("checked cells (accepted)" if checked_only else
              "ALL cells: none is checked yet, these values were computed automatically")
+    measures = key_measures(rows)
     targets = list(OrderedDict.fromkeys(r["target"] for r in prism_rows))
     conditions = sorted(OrderedDict.fromkeys((r.get("condition") or "no condition") for r in prism_rows))
     for target in targets:
         trows = _sorted([r for r in prism_rows if r["target"] == target])
-        for key, short, explanation in KEY_MEASURES:
+        for key, short, explanation in measures:
             if not any(isinstance(_num(r.get(key)), (int, float)) for r in trows):
                 continue                     # e.g. no actin channel in any cell: no actin sheet
             ws = wb.create_sheet(_sheet_title(f"{target} {short}", used))
@@ -333,7 +379,7 @@ def write_results(path: str | Path, rows: list[dict], profile_rows: list[dict], 
 
     # Replicates
     ws = wb.create_sheet(_sheet_title("Replicates", used))
-    head = ["Target", "Experiment", "Condition", "Cells"] + [h for _, h, _ in KEY_MEASURES]
+    head = ["Target", "Experiment", "Condition", "Cells"] + [h for _, h, _ in measures]
     _header(ws, 1, head)
     groups: "OrderedDict[tuple, list]" = OrderedDict()
     for row in _sorted(prism_rows):
@@ -341,7 +387,7 @@ def write_results(path: str | Path, rows: list[dict], profile_rows: list[dict], 
     for i, ((target, exp, cond), grp) in enumerate(groups.items(), start=2):
         for c, v in enumerate((target, exp, cond, len(grp)), start=1):
             ws.cell(row=i, column=c, value=_num(v))
-        for c, (key, _, _) in enumerate(KEY_MEASURES, start=5):
+        for c, (key, _, _) in enumerate(measures, start=5):
             vals = [v for v in (_num(g.get(key)) for g in grp) if isinstance(v, (int, float))]
             cell = ws.cell(row=i, column=c, value=sum(vals) / len(vals) if vals else None)
             cell.number_format = PCT if key.endswith("_pct") else ENR

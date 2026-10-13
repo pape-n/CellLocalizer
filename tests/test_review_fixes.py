@@ -142,7 +142,7 @@ def test_prism_sheets_hold_checked_cells_with_ids(tmp_path):
     assert [ws.cell(row=i, column=1).value for i in (3, 4, 5)] == [1.5, 2.5, None]
     assert ws.cell(row=3, column=3).value == "e1 / a.czi / cell1"
     assert wb["Replicates"].cell(row=2, column=4).value == 2
-    statuses = [r[5] for r in wb["Summary"].iter_rows(min_row=3, values_only=True)]
+    statuses = [r[6] for r in wb["Summary"].iter_rows(min_row=3, values_only=True)]
     assert "to check" in statuses and "automatic" not in statuses
     readme = " ".join(str(c.value) for r in wb["Read me"].iter_rows() for c in r if c.value)
     assert "within 0.4 µm" in readme

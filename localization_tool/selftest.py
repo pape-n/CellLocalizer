@@ -61,7 +61,11 @@ def _checks():
     golden, truth = make_golden_cell()
     roles = [ChannelAssignment("Target", "T", "#FF2BD6"), ChannelAssignment("Actin", "Actin", "#2BD46B"),
              ChannelAssignment("Nucleus", "Nucleus", "#3D7DFF")]
-    res = analyze_cell(golden, roles, masks={k: truth[k] for k in ("cell", "nucleus", "actin")})
+    from localization_tool.core.params import AnalysisParams
+
+    # the analytic shares of the golden cell are for the whole target signal (setting "all", D89)
+    res = analyze_cell(golden, roles, AnalysisParams(target_signal="all"),
+                       masks={k: truth[k] for k in ("cell", "nucleus", "actin")})
     dev = max(abs(res.target_values["T"][k] - v) for k, v in truth["expected"].items() if k.endswith("_pct"))
     assert dev < 0.5, f"golden cell deviates by {dev:.2f} percentage points"
     auto = analyze_cell(golden, roles)
