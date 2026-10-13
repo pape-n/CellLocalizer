@@ -1,0 +1,19 @@
+# Never commit lab data (README, Datenschutz)
+*.czi
+*.lif
+*.nd2
+*.oir
+*.tif
+*.tiff
+*.avi
+*.zip
+!packaging/*.zip
+# Python and build
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.spec.bak
+.pytest_cache/
+.DS_Store
